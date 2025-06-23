@@ -5,6 +5,7 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const path = require('path');
 const crypto = require('crypto');
+const EventEmitter = require('events');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,11 +16,210 @@ app.use(express.json({ limit: '10mb' }));
 
 // Configurações
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
-const MAX_CONCURRENT_DOWNLOADS = 3;
+const MAX_CONCURRENT_DOWNLOADS = parseInt(process.env.MAX_CONCURRENT || '3');
+const MAX_QUEUE_SIZE = parseInt(process.env.MAX_QUEUE_SIZE || '20');
 const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutos
+const QUEUE_TIMEOUT = 10 * 60 * 1000; // 10 minutos na fila
 
-// Controle de downloads simultâneos
+// Sistema de fila
+class DownloadQueue extends EventEmitter {
+  constructor() {
+    super();
+    this.queue = new Map(); // Map para facilitar busca por ID
+    this.processing = new Set(); // IDs sendo processados
+    this.stats = {
+      totalProcessed: 0,
+      totalFailed: 0,
+      totalQueued: 0
+    };
+  }
+
+  // Adicionar item à fila
+  enqueue(item) {
+    if (this.queue.size >= MAX_QUEUE_SIZE) {
+      throw new Error('Fila cheia. Tente novamente mais tarde.');
+    }
+
+    const queueItem = {
+      ...item,
+      id: this.generateId(),
+      status: 'queued',
+      queuedAt: new Date(),
+      position: this.queue.size + 1
+    };
+
+    this.queue.set(queueItem.id, queueItem);
+    this.stats.totalQueued++;
+    
+    // Tentar processar imediatamente
+    this.processNext();
+    
+    return queueItem.id;
+  }
+
+  // Processar próximo item da fila
+  async processNext() {
+    if (this.processing.size >= MAX_CONCURRENT_DOWNLOADS) {
+      return; // Já temos o máximo de processamentos simultâneos
+    }
+
+    // Pegar o primeiro item da fila
+    const nextItem = this.getNextQueuedItem();
+    if (!nextItem) {
+      return; // Fila vazia
+    }
+
+    // Mover para processamento
+    nextItem.status = 'processing';
+    nextItem.startedAt = new Date();
+    this.processing.add(nextItem.id);
+    
+    // Atualizar posições na fila
+    this.updateQueuePositions();
+    
+    this.emit('itemStarted', nextItem);
+
+    try {
+      // Processar o download/conversão
+      const result = await this.processDownload(nextItem);
+      
+      // Sucesso
+      nextItem.status = 'completed';
+      nextItem.completedAt = new Date();
+      nextItem.result = result;
+      
+      this.stats.totalProcessed++;
+      this.emit('itemCompleted', nextItem);
+      
+    } catch (error) {
+      // Erro no processamento
+      nextItem.status = 'failed';
+      nextItem.error = error.message;
+      nextItem.failedAt = new Date();
+      
+      this.stats.totalFailed++;
+      this.emit('itemFailed', nextItem, error);
+    } finally {
+      // Remover do processamento e da fila
+      this.processing.delete(nextItem.id);
+      this.queue.delete(nextItem.id);
+      
+      // Processar próximo item
+      setTimeout(() => this.processNext(), 100);
+    }
+  }
+
+  // Obter próximo item para processamento
+  getNextQueuedItem() {
+    for (const [id, item] of this.queue) {
+      if (item.status === 'queued') {
+        return item;
+      }
+    }
+    return null;
+  }
+
+  // Atualizar posições na fila
+  updateQueuePositions() {
+    let position = 1;
+    for (const [id, item] of this.queue) {
+      if (item.status === 'queued') {
+        item.position = position++;
+      }
+    }
+  }
+
+  // Obter status de um item
+  getItemStatus(id) {
+    return this.queue.get(id) || null;
+  }
+
+  // Gerar ID único
+  generateId() {
+    return crypto.randomBytes(8).toString('hex');
+  }
+
+  // Processar download (lógica extraída)
+  async processDownload(queueItem) {
+    const { youtubeUrl, videoInfo } = queueItem;
+    
+    console.log(`[${queueItem.id}] Iniciando download: ${videoInfo.title} (${videoInfo.duration}s)`);
+    
+    const outputFile = await downloadAndConvert(youtubeUrl, DOWNLOADS_DIR);
+    
+    console.log(`[${queueItem.id}] Conversão concluída: ${path.basename(outputFile)}`);
+    
+    return {
+      outputFile,
+      filename: `${videoInfo.title.replace(/[^\w\s-]/g, '').trim()}.wav`
+    };
+  }
+
+  // Limpar itens antigos da fila
+  cleanupQueue() {
+    const now = Date.now();
+    let cleaned = 0;
+    
+    for (const [id, item] of this.queue) {
+      const age = now - item.queuedAt.getTime();
+      
+      if (age > QUEUE_TIMEOUT) {
+        this.queue.delete(id);
+        cleaned++;
+        
+        if (item.status === 'queued') {
+          this.emit('itemTimeout', item);
+        }
+      }
+    }
+    
+    if (cleaned > 0) {
+      console.log(`Limpeza da fila: ${cleaned} itens removidos`);
+      this.updateQueuePositions();
+    }
+  }
+
+  // Estatísticas da fila
+  getStats() {
+    const queued = Array.from(this.queue.values()).filter(item => item.status === 'queued').length;
+    const processing = this.processing.size;
+    
+    return {
+      ...this.stats,
+      currentQueued: queued,
+      currentProcessing: processing,
+      queueSize: this.queue.size,
+      maxConcurrent: MAX_CONCURRENT_DOWNLOADS,
+      maxQueueSize: MAX_QUEUE_SIZE
+    };
+  }
+}
+
+// Instância global da fila
+const downloadQueue = new DownloadQueue();
+
+// Controle de downloads simultâneos (mantido para compatibilidade)
 let activeDownloads = 0;
+
+// Event listeners da fila
+downloadQueue.on('itemStarted', (item) => {
+  activeDownloads++;
+  console.log(`[${item.id}] Processamento iniciado (${activeDownloads}/${MAX_CONCURRENT_DOWNLOADS})`);
+});
+
+downloadQueue.on('itemCompleted', (item) => {
+  activeDownloads--;
+  console.log(`[${item.id}] Processamento concluído`);
+});
+
+downloadQueue.on('itemFailed', (item, error) => {
+  activeDownloads--;
+  console.error(`[${item.id}] Processamento falhou:`, error.message);
+});
+
+downloadQueue.on('itemTimeout', (item) => {
+  console.log(`[${item.id}] Item removido da fila por timeout`);
+});
 
 // Criar diretório de downloads se não existir
 async function ensureDownloadsDir() {
@@ -163,16 +363,6 @@ app.post('/convert-youtube', async (req, res) => {
     });
   }
   
-  // Controle de limite de downloads simultâneos
-  if (activeDownloads >= MAX_CONCURRENT_DOWNLOADS) {
-    return res.status(429).json({
-      error: 'Muitas requisições',
-      message: 'Tente novamente em alguns momentos'
-    });
-  }
-  
-  activeDownloads++;
-  
   try {
     // Obter informações do vídeo
     const videoInfo = await getVideoInfo(youtubeUrl);
@@ -185,30 +375,86 @@ app.post('/convert-youtube', async (req, res) => {
       });
     }
     
-    console.log(`Iniciando download: ${videoInfo.title} (${videoInfo.duration}s)`);
-    
-    // Download e conversão
-    const outputFile = await downloadAndConvert(youtubeUrl, DOWNLOADS_DIR);
-    
-    // Obter informações do arquivo final
-    const stats = await fs.stat(outputFile);
-    const filename = `${videoInfo.title.replace(/[^\w\s-]/g, '').trim()}.wav`;
-    
-    console.log(`Conversão concluída: ${path.basename(outputFile)}`);
-    
-    // Enviar arquivo para download
-    res.download(outputFile, filename, async (err) => {
-      if (err) {
-        console.error('Erro ao enviar arquivo:', err);
+    // Verificar se pode processar imediatamente
+    if (activeDownloads < MAX_CONCURRENT_DOWNLOADS) {
+      // Processar imediatamente
+      try {
+        const queueId = downloadQueue.enqueue({
+          youtubeUrl,
+          videoInfo,
+          req,
+          res
+        });
+        
+        // Aguardar conclusão
+        const checkStatus = setInterval(() => {
+          const item = downloadQueue.getItemStatus(queueId);
+          
+          if (!item) {
+            clearInterval(checkStatus);
+            return;
+          }
+          
+          if (item.status === 'completed') {
+            clearInterval(checkStatus);
+            
+            // Enviar arquivo para download
+            res.download(item.result.outputFile, item.result.filename, async (err) => {
+              if (err) {
+                console.error('Erro ao enviar arquivo:', err);
+              }
+              
+              // Limpar arquivo após envio
+              try {
+                await fs.unlink(item.result.outputFile);
+              } catch (cleanupError) {
+                console.error('Erro ao limpar arquivo:', cleanupError);
+              }
+            });
+            
+          } else if (item.status === 'failed') {
+            clearInterval(checkStatus);
+            
+            res.status(500).json({
+              error: 'Erro no processamento',
+              message: item.error
+            });
+          }
+        }, 1000);
+        
+      } catch (error) {
+        return res.status(503).json({
+          error: 'Fila cheia',
+          message: error.message
+        });
       }
       
-      // Limpar arquivo após envio
+    } else {
+      // Adicionar à fila
       try {
-        await fs.unlink(outputFile);
-      } catch (cleanupError) {
-        console.error('Erro ao limpar arquivo:', cleanupError);
+        const queueId = downloadQueue.enqueue({
+          youtubeUrl,
+          videoInfo
+        });
+        
+        const queueItem = downloadQueue.getItemStatus(queueId);
+        
+        res.status(202).json({
+          message: 'Sua conversão está na fila, por favor aguarde...',
+          queueId: queueId,
+          position: queueItem.position,
+          estimatedWaitTime: `${Math.ceil(queueItem.position * 2)} minutos`,
+          videoTitle: videoInfo.title,
+          status: 'queued'
+        });
+        
+      } catch (error) {
+        return res.status(503).json({
+          error: 'Fila cheia',
+          message: error.message
+        });
       }
-    });
+    }
     
   } catch (error) {
     console.error('Erro no processamento:', error);
@@ -217,18 +463,45 @@ app.post('/convert-youtube', async (req, res) => {
       error: 'Erro no processamento',
       message: error.message
     });
-  } finally {
-    activeDownloads--;
   }
+});
+
+// Endpoint para verificar status na fila
+app.get('/queue/:queueId', (req, res) => {
+  const { queueId } = req.params;
+  const item = downloadQueue.getItemStatus(queueId);
+  
+  if (!item) {
+    return res.status(404).json({
+      error: 'Item não encontrado',
+      message: 'ID da fila inválido ou item já foi processado'
+    });
+  }
+  
+  res.json({
+    id: item.id,
+    status: item.status,
+    position: item.position || null,
+    videoTitle: item.videoInfo.title,
+    queuedAt: item.queuedAt,
+    startedAt: item.startedAt || null,
+    estimatedWaitTime: item.position ? `${Math.ceil(item.position * 2)} minutos` : null
+  });
 });
 
 // Endpoint de status
 app.get('/status', (req, res) => {
+  const queueStats = downloadQueue.getStats();
+  
   res.json({
     status: 'online',
     activeDownloads,
-    maxConcurrent: MAX_CONCURRENT_DOWNLOADS,
-    uptime: process.uptime()
+    queue: queueStats,
+    uptime: process.uptime(),
+    config: {
+      maxConcurrent: MAX_CONCURRENT_DOWNLOADS,
+      maxQueueSize: MAX_QUEUE_SIZE
+    }
   });
 });
 
@@ -253,11 +526,13 @@ async function startServer() {
     
     // Configurar limpeza automática
     setInterval(cleanupOldFiles, CLEANUP_INTERVAL);
+    setInterval(() => downloadQueue.cleanupQueue(), CLEANUP_INTERVAL);
     
     app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT}`);
       console.log(`📁 Diretório de downloads: ${DOWNLOADS_DIR}`);
       console.log(`⚡ Máximo de downloads simultâneos: ${MAX_CONCURRENT_DOWNLOADS}`);
+      console.log(`📋 Tamanho máximo da fila: ${MAX_QUEUE_SIZE}`);
     });
     
   } catch (error) {
