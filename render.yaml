@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: alt-in-backend
+    env: node
+    buildCommand: |
+      apt-get update && apt-get install -y ffmpeg
+      npm install
+    startCommand: node server.js
