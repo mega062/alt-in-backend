@@ -193,8 +193,8 @@ class DownloadQueue extends EventEmitter {
     
     console.log(`[${queueItem.id}] Iniciando download: ${videoInfo.title} (${videoInfo.duration}s)`);
     
-    // Usar estratégia ultra avançada
-    const outputFile = await downloadAndConvertUltraAdvanced(youtubeUrl, DOWNLOADS_DIR);
+    // Usar estratégia ultra avançada final
+    const outputFile = await downloadAndConvertUltraAdvancedFinal(youtubeUrl, DOWNLOADS_DIR);
     
     console.log(`[${queueItem.id}] Conversão concluída: ${path.basename(outputFile)}`);
     
@@ -360,6 +360,76 @@ function validateYouTubeUrl(url) {
   }
 }
 
+// Função para obter informações usando API externa
+async function getVideoInfoFromAPI(url) {
+  const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
+  
+  try {
+    console.log('🌐 Obtendo informações via API externa...');
+    
+    const apiUrl = `https://noembed.com/embed?url=${encodeURIComponent(cleanUrl)}`;
+    
+    const curlCommand = `curl -s -H "User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15" "${apiUrl}"`;
+    
+    const { stdout } = await execAsync(curlCommand, { timeout: 10000 });
+    
+    if (stdout && stdout.trim()) {
+      const data = JSON.parse(stdout);
+      
+      if (data.title) {
+        console.log('✅ Informações obtidas via API externa');
+        
+        return {
+          title: data.title,
+          duration: data.duration || 300,
+          author: data.author_name || 'Unknown'
+        };
+      }
+    }
+    
+    throw new Error('API externa não retornou informações válidas');
+    
+  } catch (error) {
+    console.log('❌ API externa falhou:', error.message);
+    throw error;
+  }
+}
+
+// Função para criar um simples web scraper
+async function getVideoInfoWithScraping(url) {
+  try {
+    console.log('🕷️ Tentando web scraping...');
+    
+    const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
+    
+    const curlCommand = `curl -s -A "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15" "${cleanUrl}" | grep -o '<title>[^<]*</title>' | sed 's/<title>//' | sed 's/<\\/title>//' | head -1`;
+    
+    const { stdout } = await execAsync(curlCommand, { timeout: 10000 });
+    
+    if (stdout && stdout.trim()) {
+      let title = stdout.trim();
+      
+      title = title.replace(' - YouTube', '').replace('YouTube', '').trim();
+      
+      if (title && title.length > 3) {
+        console.log('✅ Título obtido via scraping');
+        
+        return {
+          title: title,
+          duration: 300,
+          author: 'Unknown'
+        };
+      }
+    }
+    
+    throw new Error('Scraping não encontrou título válido');
+    
+  } catch (error) {
+    console.log('❌ Scraping falhou:', error.message);
+    throw error;
+  }
+}
+
 // Função para obter informações com bypass avançado
 async function getVideoInfoWithYtDlpAdvanced(url) {
   try {
@@ -368,7 +438,6 @@ async function getVideoInfoWithYtDlpAdvanced(url) {
     const ytDlpPath = await ensureYtDlp();
     const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
     
-    // Estratégias para obter informações
     const infoStrategies = [
       `${ytDlpPath} --dump-json --no-download --extractor-args "youtube:player_client=ios" --user-agent "${BYPASS_CONFIG.userAgents[2]}" "${cleanUrl}"`,
       `${ytDlpPath} --dump-json --no-download --extractor-args "youtube:player_client=android" --user-agent "${BYPASS_CONFIG.userAgents[3]}" "${cleanUrl}"`,
@@ -417,15 +486,15 @@ async function getVideoInfoWithYtDlpAdvanced(url) {
   }
 }
 
-// Obter informações do vídeo com fallbacks
-async function getVideoInfoAdvanced(url) {
+// Função getVideoInfo atualizada com todas as estratégias
+async function getVideoInfoUltraAdvanced(url) {
   try {
     console.log(`📋 Obtendo informações do vídeo: ${url}`);
     
     const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
     console.log(`🧹 URL limpa: ${cleanUrl}`);
     
-    // Tentar ytdl-core primeiro (rápido)
+    // Estratégia 1: ytdl-core
     try {
       const info = await ytdl.getInfo(cleanUrl, {
         requestOptions: {
@@ -450,20 +519,35 @@ async function getVideoInfoAdvanced(url) {
       console.log(`❌ ytdl-core info falhou: ${error.message.split('\n')[0]}`);
     }
     
-    // Fallback para yt-dlp avançado
+    // Estratégia 2: yt-dlp avançado
     try {
       return await getVideoInfoWithYtDlpAdvanced(url);
     } catch (error2) {
       console.log(`❌ yt-dlp info falhou: ${error2.message.split('\n')[0]}`);
-      
-      // Fallback final
-      const videoId = extractVideoId(cleanUrl);
-      return {
-        title: `YouTube Video ${videoId}`,
-        duration: 300,
-        author: 'Unknown'
-      };
     }
+    
+    // Estratégia 3: API externa
+    try {
+      return await getVideoInfoFromAPI(url);
+    } catch (error3) {
+      console.log(`❌ API externa info falhou: ${error3.message.split('\n')[0]}`);
+    }
+    
+    // Estratégia 4: Web scraping
+    try {
+      return await getVideoInfoWithScraping(url);
+    } catch (error4) {
+      console.log(`❌ Scraping falhou: ${error4.message.split('\n')[0]}`);
+    }
+    
+    // Fallback final
+    const videoId = extractVideoId(cleanUrl);
+    return {
+      title: `YouTube Video ${videoId}`,
+      duration: 300,
+      author: 'Unknown'
+    };
+    
   } catch (error) {
     console.error('❌ Erro crítico ao obter informações:', error);
     throw error;
@@ -479,7 +563,6 @@ async function downloadWithYtDlpAdvanced(youtubeUrl, outputDir) {
     const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
     const outputFile = path.join(outputDir, generateUniqueFilename('wav'));
     
-    // Estratégias de bypass
     const strategies = [
       {
         name: 'iOS Client',
@@ -503,7 +586,6 @@ async function downloadWithYtDlpAdvanced(youtubeUrl, outputDir) {
       }
     ];
     
-    // Tentar cada estratégia
     for (let i = 0; i < strategies.length; i++) {
       const strategy = strategies[i];
       
@@ -511,7 +593,7 @@ async function downloadWithYtDlpAdvanced(youtubeUrl, outputDir) {
         console.log(`🔧 Tentativa ${i + 1}/5: ${strategy.name}`);
         
         if (i > 0) {
-          const delayTime = Math.random() * 3000 + 2000; // 2-5 segundos
+          const delayTime = Math.random() * 3000 + 2000;
           console.log(`⏳ Aguardando ${Math.round(delayTime/1000)}s para evitar rate limit...`);
           await delay(delayTime);
         }
@@ -520,7 +602,6 @@ async function downloadWithYtDlpAdvanced(youtubeUrl, outputDir) {
           timeout: 15 * 60 * 1000
         });
         
-        // Encontrar o arquivo gerado
         const files = await fs.readdir(outputDir);
         const generatedFile = files.find(file => 
           file.includes(path.basename(outputFile, '.wav')) && file.endsWith('.wav')
@@ -646,8 +727,8 @@ async function downloadAndConvert(youtubeUrl, outputDir) {
   });
 }
 
-// Função principal com estratégias ultra avançadas
-async function downloadAndConvertUltraAdvanced(youtubeUrl, outputDir) {
+// Função principal com todas as estratégias - VERSÃO FINAL
+async function downloadAndConvertUltraAdvancedFinal(youtubeUrl, outputDir) {
   const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
   
   // Estratégia 1: ytdl-core rápido
@@ -665,10 +746,11 @@ async function downloadAndConvertUltraAdvanced(youtubeUrl, outputDir) {
     console.log(`❌ yt-dlp avançado falhou: ${error.message.split('\n')[0]}`);
   }
   
-  console.log('🔄 Estratégia 3: Todas as estratégias locais falharam');
-  console.log('💡 Sugestão: Vídeo pode ter restrições geográficas ou de idade');
+  console.log('🔄 Estratégia 3: Todas as estratégias automatizadas falharam');
+  console.log('💡 Este vídeo pode ter proteções especiais ou restrições geográficas');
+  console.log('🔧 Sugestão: Tente um vídeo diferente ou aguarde alguns minutos');
   
-  throw new Error('❌ Todas as estratégias avançadas falharam');
+  throw new Error('❌ Todas as estratégias avançadas falharam - vídeo protegido ou IP bloqueado');
 }
 
 // Endpoint principal
@@ -690,7 +772,7 @@ app.post('/convert-youtube', async (req, res) => {
   try {
     console.log('Obtendo informações do vídeo...');
     
-    const videoInfo = await getVideoInfoAdvanced(youtubeUrl);
+    const videoInfo = await getVideoInfoUltraAdvanced(youtubeUrl);
     console.log('Informações obtidas:', videoInfo);
     
     if (videoInfo.duration > 1800) {
@@ -879,7 +961,7 @@ async function startServer() {
       console.log(`📁 Diretório de downloads: ${DOWNLOADS_DIR}`);
       console.log(`⚡ Máximo de downloads simultâneos: ${MAX_CONCURRENT_DOWNLOADS}`);
       console.log(`📋 Tamanho máximo da fila: ${MAX_QUEUE_SIZE}`);
-      console.log(`🔧 Estratégias: ytdl-core + yt-dlp + bypass avançado`);
+      console.log(`🔧 Estratégias: ytdl-core + yt-dlp + API externa + scraping`);
     });
     
   } catch (error) {
