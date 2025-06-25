@@ -11,13 +11,29 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const execAsync = promisify(exec);
 
+// ======================================================
+// CORS MIDDLEWARE - ADICIONAR ISTO NO SEU SERVIDOR
+// ======================================================
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  
+  // Responder a requisições OPTIONS (preflight)
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+
 // Middleware
 app.use(express.json({ limit: '10mb' }));
 
 // Configurações
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
-const MAX_CONCURRENT_DOWNLOADS = parseInt(process.env.MAX_CONCURRENT || '3');
-const MAX_QUEUE_SIZE = parseInt(process.env.MAX_QUEUE_SIZE || '20');
+const MAX_CONCURRENT_DOWNLOADS = parseInt(process.env.MAX_CONCURRENT || '5');
+const MAX_QUEUE_SIZE = parseInt(process.env.MAX_QUEUE_SIZE || '30');
 const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutos
 const QUEUE_TIMEOUT = 10 * 60 * 1000; // 10 minutos na fila
 
@@ -27,6 +43,7 @@ class DownloadQueue extends EventEmitter {
     super();
     this.queue = new Map(); // Map para facilitar busca por ID
     this.processing = new Set(); // IDs sendo processados
+    this.completedItems = new Map(); // Items concluídos para download
     this.stats = {
       totalProcessed: 0,
       totalFailed: 0,
@@ -88,6 +105,9 @@ class DownloadQueue extends EventEmitter {
       nextItem.completedAt = new Date();
       nextItem.result = result;
       
+      // Salvar item concluído para download posterior
+      this.completedItems.set(nextItem.id, nextItem);
+      
       this.stats.totalProcessed++;
       this.emit('itemCompleted', nextItem);
       
@@ -100,9 +120,13 @@ class DownloadQueue extends EventEmitter {
       this.stats.totalFailed++;
       this.emit('itemFailed', nextItem, error);
     } finally {
-      // Remover do processamento e da fila
+      // Remover do processamento
       this.processing.delete(nextItem.id);
-      this.queue.delete(nextItem.id);
+      
+      // Manter na fila até ser baixado se concluído com sucesso
+      if (nextItem.status !== 'completed') {
+        this.queue.delete(nextItem.id);
+      }
       
       // Processar próximo item
       setTimeout(() => this.processNext(), 100);
@@ -131,7 +155,18 @@ class DownloadQueue extends EventEmitter {
 
   // Obter status de um item
   getItemStatus(id) {
-    return this.queue.get(id) || null;
+    return this.queue.get(id) || this.completedItems.get(id) || null;
+  }
+
+  // Obter item concluído para download
+  getCompletedItem(id) {
+    return this.completedItems.get(id) || null;
+  }
+
+  // Remover item concluído após download
+  removeCompletedItem(id) {
+    this.completedItems.delete(id);
+    this.queue.delete(id);
   }
 
   // Gerar ID único
@@ -173,6 +208,16 @@ class DownloadQueue extends EventEmitter {
       }
     }
     
+    // Limpar items concluídos antigos também
+    for (const [id, item] of this.completedItems) {
+      const age = now - item.completedAt.getTime();
+      
+      if (age > QUEUE_TIMEOUT) {
+        this.completedItems.delete(id);
+        cleaned++;
+      }
+    }
+    
     if (cleaned > 0) {
       console.log(`Limpeza da fila: ${cleaned} itens removidos`);
       this.updateQueuePositions();
@@ -189,6 +234,7 @@ class DownloadQueue extends EventEmitter {
       currentQueued: queued,
       currentProcessing: processing,
       queueSize: this.queue.size,
+      completedItems: this.completedItems.size,
       maxConcurrent: MAX_CONCURRENT_DOWNLOADS,
       maxQueueSize: MAX_QUEUE_SIZE
     };
@@ -355,6 +401,8 @@ async function downloadAndConvert(youtubeUrl, outputDir) {
 app.post('/convert-youtube', async (req, res) => {
   const { youtubeUrl } = req.body;
   
+  console.log('Recebida requisição de conversão:', youtubeUrl);
+  
   // Validações
   if (!validateYouTubeUrl(youtubeUrl)) {
     return res.status(400).json({
@@ -375,86 +423,23 @@ app.post('/convert-youtube', async (req, res) => {
       });
     }
     
-    // Verificar se pode processar imediatamente
-    if (activeDownloads < MAX_CONCURRENT_DOWNLOADS) {
-      // Processar imediatamente
-      try {
-        const queueId = downloadQueue.enqueue({
-          youtubeUrl,
-          videoInfo,
-          req,
-          res
-        });
-        
-        // Aguardar conclusão
-        const checkStatus = setInterval(() => {
-          const item = downloadQueue.getItemStatus(queueId);
-          
-          if (!item) {
-            clearInterval(checkStatus);
-            return;
-          }
-          
-          if (item.status === 'completed') {
-            clearInterval(checkStatus);
-            
-            // Enviar arquivo para download
-            res.download(item.result.outputFile, item.result.filename, async (err) => {
-              if (err) {
-                console.error('Erro ao enviar arquivo:', err);
-              }
-              
-              // Limpar arquivo após envio
-              try {
-                await fs.unlink(item.result.outputFile);
-              } catch (cleanupError) {
-                console.error('Erro ao limpar arquivo:', cleanupError);
-              }
-            });
-            
-          } else if (item.status === 'failed') {
-            clearInterval(checkStatus);
-            
-            res.status(500).json({
-              error: 'Erro no processamento',
-              message: item.error
-            });
-          }
-        }, 1000);
-        
-      } catch (error) {
-        return res.status(503).json({
-          error: 'Fila cheia',
-          message: error.message
-        });
-      }
-      
-    } else {
-      // Adicionar à fila
-      try {
-        const queueId = downloadQueue.enqueue({
-          youtubeUrl,
-          videoInfo
-        });
-        
-        const queueItem = downloadQueue.getItemStatus(queueId);
-        
-        res.status(202).json({
-          message: 'Sua conversão está na fila, por favor aguarde...',
-          queueId: queueId,
-          position: queueItem.position,
-          estimatedWaitTime: `${Math.ceil(queueItem.position * 2)} minutos`,
-          videoTitle: videoInfo.title,
-          status: 'queued'
-        });
-        
-      } catch (error) {
-        return res.status(503).json({
-          error: 'Fila cheia',
-          message: error.message
-        });
-      }
-    }
+    // Adicionar à fila sempre (para manter consistência)
+    const queueId = downloadQueue.enqueue({
+      youtubeUrl,
+      videoInfo
+    });
+    
+    const queueItem = downloadQueue.getItemStatus(queueId);
+    
+    res.status(202).json({
+      success: true,
+      message: 'Conversão iniciada',
+      queueId: queueId,
+      position: queueItem.position,
+      estimatedWaitTime: `${Math.ceil(queueItem.position * 2)} minutos`,
+      videoTitle: videoInfo.title,
+      status: queueItem.status
+    });
     
   } catch (error) {
     console.error('Erro no processamento:', error);
@@ -485,8 +470,63 @@ app.get('/queue/:queueId', (req, res) => {
     videoTitle: item.videoInfo.title,
     queuedAt: item.queuedAt,
     startedAt: item.startedAt || null,
+    completedAt: item.completedAt || null,
     estimatedWaitTime: item.position ? `${Math.ceil(item.position * 2)} minutos` : null
   });
+});
+
+// Endpoint para download do arquivo
+app.get('/download/:queueId', async (req, res) => {
+  const { queueId } = req.params;
+  const item = downloadQueue.getCompletedItem(queueId);
+  
+  if (!item || item.status !== 'completed') {
+    return res.status(404).json({
+      error: 'Arquivo não encontrado',
+      message: 'Conversão não concluída ou arquivo não disponível'
+    });
+  }
+  
+  try {
+    const filePath = item.result.outputFile;
+    const filename = item.result.filename;
+    
+    // Verificar se arquivo existe
+    await fs.access(filePath);
+    
+    // Configurar headers para download
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Type', 'audio/wav');
+    
+    // Enviar arquivo
+    res.sendFile(filePath, async (err) => {
+      if (err) {
+        console.error('Erro ao enviar arquivo:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Erro ao enviar arquivo' });
+        }
+      } else {
+        console.log(`[${queueId}] Arquivo enviado com sucesso`);
+        
+        // Remover item da fila e arquivo do servidor após envio
+        downloadQueue.removeCompletedItem(queueId);
+        
+        try {
+          await fs.unlink(filePath);
+          console.log(`[${queueId}] Arquivo limpo do servidor`);
+        } catch (cleanupError) {
+          console.error('Erro ao limpar arquivo:', cleanupError);
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erro no download:', error);
+    res.status(500).json({
+      error: 'Erro no download',
+      message: error.message
+    });
+  }
 });
 
 // Endpoint de status
@@ -507,7 +547,11 @@ app.get('/status', (req, res) => {
 
 // Endpoint de saúde
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    cors: 'enabled'
+  });
 });
 
 // Middleware de tratamento de erros
@@ -530,6 +574,7 @@ async function startServer() {
     
     app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT}`);
+      console.log(`🌐 CORS habilitado para todas as origens`);
       console.log(`📁 Diretório de downloads: ${DOWNLOADS_DIR}`);
       console.log(`⚡ Máximo de downloads simultâneos: ${MAX_CONCURRENT_DOWNLOADS}`);
       console.log(`📋 Tamanho máximo da fila: ${MAX_QUEUE_SIZE}`);
