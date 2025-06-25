@@ -160,7 +160,8 @@ class DownloadQueue extends EventEmitter {
     
     console.log(`[${queueItem.id}] Iniciando download: ${videoInfo.title} (${videoInfo.duration}s)`);
     
-    const outputFile = await downloadAndConvert(youtubeUrl, DOWNLOADS_DIR);
+    // Usar estratégia múltipla
+    const outputFile = await downloadAndConvertAdvanced(youtubeUrl, DOWNLOADS_DIR);
     
     console.log(`[${queueItem.id}] Conversão concluída: ${path.basename(outputFile)}`);
     
@@ -281,6 +282,60 @@ async function cleanupOldFiles() {
   }
 }
 
+// Função para baixar yt-dlp se não existir
+async function ensureYtDlp() {
+  try {
+    const ytDlpPath = path.join(__dirname, 'yt-dlp');
+    
+    try {
+      await fs.access(ytDlpPath);
+      console.log('yt-dlp já está disponível');
+      return ytDlpPath;
+    } catch {
+      console.log('Baixando yt-dlp...');
+      
+      // Baixar yt-dlp
+      await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${ytDlpPath}`);
+      await execAsync(`chmod +x ${ytDlpPath}`);
+      
+      console.log('yt-dlp baixado com sucesso');
+      return ytDlpPath;
+    }
+  } catch (error) {
+    console.error('Erro ao configurar yt-dlp:', error);
+    throw new Error('yt-dlp não disponível');
+  }
+}
+
+// Obter informações do vídeo usando yt-dlp
+async function getVideoInfoWithYtDlp(url) {
+  try {
+    console.log('Obtendo informações com yt-dlp...');
+    
+    const ytDlpPath = await ensureYtDlp();
+    const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
+    
+    // Comando para obter apenas informações
+    const infoCommand = `${ytDlpPath} --dump-json --no-download "${cleanUrl}"`;
+    
+    const { stdout } = await execAsync(infoCommand, {
+      timeout: 30000 // 30 segundos
+    });
+    
+    const info = JSON.parse(stdout);
+    
+    return {
+      title: info.title || 'Unknown',
+      duration: parseInt(info.duration) || 300,
+      author: info.uploader || info.channel || 'Unknown'
+    };
+    
+  } catch (error) {
+    console.error('Erro ao obter info com yt-dlp:', error);
+    throw error;
+  }
+}
+
 // Obter informações do vídeo com fallbacks melhorados
 async function getVideoInfo(url) {
   try {
@@ -311,50 +366,22 @@ async function getVideoInfo(url) {
       author: info.videoDetails.author.name
     };
   } catch (error) {
-    console.log(`Primeira tentativa falhou: ${error.message}`);
+    console.log(`ytdl-core falhou: ${error.message}`);
     
+    // Fallback para yt-dlp
     try {
-      // Segunda tentativa - com cookies e headers diferentes
-      const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
-      const info = await ytdl.getInfo(cleanUrl, {
-        requestOptions: {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Cookie': 'CONSENT=YES+cb.20210328-17-p0.en+FX+667;',
-            'Accept-Language': 'en-US,en;q=0.9',
-          }
-        }
-      });
-      
-      return {
-        title: info.videoDetails.title,
-        duration: parseInt(info.videoDetails.lengthSeconds),
-        author: info.videoDetails.author.name
-      };
+      return await getVideoInfoWithYtDlp(url);
     } catch (error2) {
-      console.log(`Segunda tentativa falhou: ${error2.message}`);
+      console.log(`yt-dlp falhou: ${error2.message}`);
       
-      try {
-        // Terceira tentativa - básica
-        const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
-        const basicInfo = await ytdl.getBasicInfo(cleanUrl);
-        return {
-          title: basicInfo.videoDetails.title || 'Video',
-          duration: parseInt(basicInfo.videoDetails.lengthSeconds) || 0,
-          author: basicInfo.videoDetails.author?.name || 'Unknown'
-        };
-      } catch (error3) {
-        console.log(`Terceira tentativa falhou: ${error3.message}`);
-        
-        // Fallback - usar informações mínimas extraídas da URL
-        const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
-        const videoId = extractVideoId(cleanUrl);
-        return {
-          title: `YouTube Video ${videoId}`,
-          duration: 300, // 5 minutos como estimativa
-          author: 'Unknown'
-        };
-      }
+      // Fallback final - usar informações mínimas extraídas da URL
+      const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
+      const videoId = extractVideoId(cleanUrl);
+      return {
+        title: `YouTube Video ${videoId}`,
+        duration: 300, // 5 minutos como estimativa
+        author: 'Unknown'
+      };
     }
   }
 }
@@ -383,6 +410,44 @@ function validateYouTubeUrl(url) {
   }
 }
 
+// Download usando yt-dlp
+async function downloadWithYtDlp(youtubeUrl, outputDir) {
+  try {
+    console.log('🔄 Estratégia 2: Tentando com yt-dlp...');
+    
+    const ytDlpPath = await ensureYtDlp();
+    const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
+    const outputFile = path.join(outputDir, generateUniqueFilename('wav'));
+    
+    // Comando yt-dlp para extrair áudio diretamente como WAV
+    const ytDlpCommand = `${ytDlpPath} --extract-audio --audio-format wav --audio-quality 0 --output "${outputFile.replace('.wav', '.%(ext)s')}" "${cleanUrl}"`;
+    
+    console.log('Executando yt-dlp...');
+    await execAsync(ytDlpCommand, {
+      timeout: 15 * 60 * 1000 // 15 minutos timeout
+    });
+    
+    // Encontrar o arquivo gerado (yt-dlp pode mudar o nome)
+    const files = await fs.readdir(outputDir);
+    const generatedFile = files.find(file => 
+      file.includes(path.basename(outputFile, '.wav')) && file.endsWith('.wav')
+    );
+    
+    if (!generatedFile) {
+      throw new Error('Arquivo não foi gerado pelo yt-dlp');
+    }
+    
+    const finalFile = path.join(outputDir, generatedFile);
+    console.log(`✅ yt-dlp concluído: ${path.basename(finalFile)}`);
+    
+    return finalFile;
+    
+  } catch (error) {
+    console.error('❌ Erro com yt-dlp:', error);
+    throw new Error(`yt-dlp falhou: ${error.message}`);
+  }
+}
+
 // Download e conversão do áudio com múltiplos fallbacks
 async function downloadAndConvert(youtubeUrl, outputDir) {
   const tempAudioFile = path.join(outputDir, generateUniqueFilename('mp4'));
@@ -393,6 +458,7 @@ async function downloadAndConvert(youtubeUrl, outputDir) {
   
   return new Promise((resolve, reject) => {
     try {
+      console.log(`🔄 Estratégia 1: Tentando com ytdl-core...`);
       console.log(`Iniciando download de: ${cleanUrl}`);
       
       // Configurações otimizadas para download com múltiplos fallbacks
@@ -495,7 +561,7 @@ async function downloadAndConvert(youtubeUrl, outputDir) {
                 throw new Error('Conversão resultou em arquivo vazio');
               }
               
-              console.log(`Conversão concluída: ${(convertedStats.size / 1024 / 1024).toFixed(2)} MB`);
+              console.log(`✅ Conversão concluída: ${(convertedStats.size / 1024 / 1024).toFixed(2)} MB`);
               
               // Remover arquivo temporário
               await fs.unlink(tempAudioFile);
@@ -543,6 +609,27 @@ async function downloadAndConvert(youtubeUrl, outputDir) {
       reject(new Error(`Erro crítico: ${error.message}`));
     }
   });
+}
+
+// Função principal com estratégias múltiplas
+async function downloadAndConvertAdvanced(youtubeUrl, outputDir) {
+  const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
+  
+  // Estratégia 1: Tentar ytdl-core primeiro
+  try {
+    return await downloadAndConvert(youtubeUrl, outputDir);
+  } catch (error) {
+    console.log(`❌ ytdl-core falhou: ${error.message}`);
+  }
+  
+  // Estratégia 2: Usar yt-dlp como fallback
+  try {
+    return await downloadWithYtDlp(cleanUrl, outputDir);
+  } catch (error) {
+    console.log(`❌ yt-dlp falhou: ${error.message}`);
+  }
+  
+  throw new Error('❌ Todas as estratégias de download falharam');
 }
 
 // Endpoint principal
@@ -748,6 +835,14 @@ async function startServer() {
   try {
     await ensureDownloadsDir();
     
+    // Tentar configurar yt-dlp na inicialização
+    try {
+      await ensureYtDlp();
+      console.log('✅ yt-dlp configurado com sucesso');
+    } catch (error) {
+      console.log('⚠️  yt-dlp não disponível, usando apenas ytdl-core');
+    }
+    
     // Configurar limpeza automática
     setInterval(cleanupOldFiles, CLEANUP_INTERVAL);
     setInterval(() => downloadQueue.cleanupQueue(), CLEANUP_INTERVAL);
@@ -758,6 +853,7 @@ async function startServer() {
       console.log(`📁 Diretório de downloads: ${DOWNLOADS_DIR}`);
       console.log(`⚡ Máximo de downloads simultâneos: ${MAX_CONCURRENT_DOWNLOADS}`);
       console.log(`📋 Tamanho máximo da fila: ${MAX_QUEUE_SIZE}`);
+      console.log(`🔧 Estratégias: ytdl-core + yt-dlp fallback`);
     });
     
   } catch (error) {
