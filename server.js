@@ -304,20 +304,12 @@ async function cleanupOldFiles() {
   }
 }
 
-// Validar URL do YouTube
-function validateYouTubeUrl(url) {
-  if (!url || typeof url !== 'string') return false;
-  
-  try {
-    return ytdl.validateURL(url);
-  } catch {
-    return false;
-  }
-}
-
-// Obter informações do vídeo
+// Obter informações do vídeo com fallbacks
 async function getVideoInfo(url) {
   try {
+    console.log(`Obtendo informações do vídeo: ${url}`);
+    
+    // Primeira tentativa - método padrão
     const info = await ytdl.getInfo(url);
     return {
       title: info.videoDetails.title,
@@ -325,62 +317,169 @@ async function getVideoInfo(url) {
       author: info.videoDetails.author.name
     };
   } catch (error) {
-    throw new Error('Não foi possível obter informações do vídeo');
+    console.log(`Primeira tentativa falhou: ${error.message}`);
+    
+    try {
+      // Segunda tentativa - com opções diferentes
+      const info = await ytdl.getInfo(url, {
+        requestOptions: {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+          }
+        }
+      });
+      
+      return {
+        title: info.videoDetails.title,
+        duration: parseInt(info.videoDetails.lengthSeconds),
+        author: info.videoDetails.author.name
+      };
+    } catch (error2) {
+      console.log(`Segunda tentativa falhou: ${error2.message}`);
+      
+      // Terceira tentativa - informações básicas
+      try {
+        const basicInfo = await ytdl.getBasicInfo(url);
+        return {
+          title: basicInfo.videoDetails.title || 'Video',
+          duration: parseInt(basicInfo.videoDetails.lengthSeconds) || 0,
+          author: basicInfo.videoDetails.author?.name || 'Unknown'
+        };
+      } catch (error3) {
+        console.log(`Terceira tentativa falhou: ${error3.message}`);
+        
+        // Fallback - usar informações mínimas extraídas da URL
+        const videoId = extractVideoId(url);
+        return {
+          title: `YouTube Video ${videoId}`,
+          duration: 300, // 5 minutos como estimativa
+          author: 'Unknown'
+        };
+      }
+    }
   }
 }
 
-// Download e conversão do áudio
+// Extrair ID do vídeo da URL
+function extractVideoId(url) {
+  const regex = /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/;
+  const match = url.match(regex);
+  return match ? match[1] : 'unknown';
+}
+
+// Validar URL do YouTube com mais robustez
+function validateYouTubeUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  
+  try {
+    // Verificação básica de formato
+    const regex = /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+    if (!regex.test(url)) return false;
+    
+    // Verificação com ytdl
+    return ytdl.validateURL(url);
+  } catch (error) {
+    console.log(`Erro na validação: ${error.message}`);
+    
+    // Fallback - verificação manual
+    const regex = /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+    return regex.test(url);
+  }
+}
+
+// Download e conversão do áudio com mais robustez
 async function downloadAndConvert(youtubeUrl, outputDir) {
   const tempAudioFile = path.join(outputDir, generateUniqueFilename('mp4'));
   const outputFile = path.join(outputDir, generateUniqueFilename('wav'));
   
   return new Promise((resolve, reject) => {
     try {
-      // Configurações otimizadas para download
-      const audioStream = ytdl(youtubeUrl, {
+      console.log(`Iniciando download de: ${youtubeUrl}`);
+      
+      // Configurações otimizadas para download com fallbacks
+      const downloadOptions = {
         filter: 'audioonly',
         quality: 'highestaudio',
-        highWaterMark: 1 << 25 // 32MB buffer
-      });
+        highWaterMark: 1 << 25, // 32MB buffer
+        requestOptions: {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+          }
+        }
+      };
       
+      const audioStream = ytdl(youtubeUrl, downloadOptions);
       const writeStream = require('fs').createWriteStream(tempAudioFile);
       
       // Timeout para downloads muito longos
       const timeout = setTimeout(() => {
         audioStream.destroy();
         writeStream.destroy();
-        reject(new Error('Download timeout - vídeo muito longo'));
-      }, 10 * 60 * 1000); // 10 minutos
+        reject(new Error('Download timeout - vídeo muito longo ou conexão lenta'));
+      }, 15 * 60 * 1000); // 15 minutos
       
       audioStream.pipe(writeStream);
       
       audioStream.on('error', (error) => {
         clearTimeout(timeout);
         writeStream.destroy();
+        console.error('Erro no stream de áudio:', error);
         reject(new Error(`Erro no download: ${error.message}`));
       });
       
       writeStream.on('error', (error) => {
         clearTimeout(timeout);
+        console.error('Erro no stream de escrita:', error);
         reject(new Error(`Erro ao salvar arquivo: ${error.message}`));
+      });
+      
+      audioStream.on('info', (info) => {
+        console.log(`Download iniciado: ${info.videoDetails.title}`);
+      });
+      
+      audioStream.on('progress', (chunkLength, downloaded, total) => {
+        const percent = downloaded / total;
+        if (percent % 0.1 < 0.01) { // Log a cada 10%
+          console.log(`Download progress: ${(percent * 100).toFixed(1)}%`);
+        }
       });
       
       writeStream.on('finish', async () => {
         clearTimeout(timeout);
+        console.log('Download concluído, iniciando conversão...');
         
         try {
+          // Verificar se arquivo foi baixado
+          const stats = await fs.stat(tempAudioFile);
+          if (stats.size === 0) {
+            throw new Error('Arquivo baixado está vazio');
+          }
+          
+          console.log(`Arquivo baixado: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+          
           // Converter para WAV usando FFmpeg com configurações otimizadas
           const ffmpegCommand = `ffmpeg -i "${tempAudioFile}" -acodec pcm_s16le -ar 44100 -ac 2 "${outputFile}"`;
           
+          console.log('Executando FFmpeg...');
           await execAsync(ffmpegCommand, {
-            timeout: 5 * 60 * 1000 // 5 minutos timeout
+            timeout: 10 * 60 * 1000 // 10 minutos timeout
           });
+          
+          // Verificar se conversão foi bem-sucedida
+          const convertedStats = await fs.stat(outputFile);
+          if (convertedStats.size === 0) {
+            throw new Error('Conversão resultou em arquivo vazio');
+          }
+          
+          console.log(`Conversão concluída: ${(convertedStats.size / 1024 / 1024).toFixed(2)} MB`);
           
           // Remover arquivo temporário
           await fs.unlink(tempAudioFile);
           
           resolve(outputFile);
         } catch (error) {
+          console.error('Erro na conversão:', error);
+          
           // Limpar arquivos em caso de erro
           try {
             await fs.unlink(tempAudioFile);
@@ -392,6 +491,7 @@ async function downloadAndConvert(youtubeUrl, outputDir) {
       });
       
     } catch (error) {
+      console.error('Erro geral no download:', error);
       reject(new Error(`Erro no processo: ${error.message}`));
     }
   });
@@ -401,10 +501,13 @@ async function downloadAndConvert(youtubeUrl, outputDir) {
 app.post('/convert-youtube', async (req, res) => {
   const { youtubeUrl } = req.body;
   
+  console.log('='.repeat(50));
   console.log('Recebida requisição de conversão:', youtubeUrl);
+  console.log('Timestamp:', new Date().toISOString());
   
   // Validações
   if (!validateYouTubeUrl(youtubeUrl)) {
+    console.log('URL inválida:', youtubeUrl);
     return res.status(400).json({
       error: 'URL inválida do YouTube',
       message: 'Por favor, forneça uma URL válida do YouTube'
@@ -412,41 +515,70 @@ app.post('/convert-youtube', async (req, res) => {
   }
   
   try {
-    // Obter informações do vídeo
+    console.log('Obtendo informações do vídeo...');
+    
+    // Obter informações do vídeo com fallbacks
     const videoInfo = await getVideoInfo(youtubeUrl);
+    console.log('Informações obtidas:', videoInfo);
     
     // Verificar duração (máximo 30 minutos)
     if (videoInfo.duration > 1800) {
+      console.log('Vídeo muito longo:', videoInfo.duration, 'segundos');
       return res.status(400).json({
         error: 'Vídeo muito longo',
-        message: 'Máximo permitido: 30 minutos'
+        message: `Duração: ${Math.round(videoInfo.duration/60)} minutos. Máximo permitido: 30 minutos`
       });
     }
     
-    // Adicionar à fila sempre (para manter consistência)
+    console.log('Adicionando à fila de processamento...');
+    
+    // Adicionar à fila
     const queueId = downloadQueue.enqueue({
       youtubeUrl,
       videoInfo
     });
     
     const queueItem = downloadQueue.getItemStatus(queueId);
+    console.log(`Item adicionado à fila com ID: ${queueId}, posição: ${queueItem.position}`);
     
     res.status(202).json({
       success: true,
-      message: 'Conversão iniciada',
+      message: 'Conversão iniciada com sucesso',
       queueId: queueId,
       position: queueItem.position,
       estimatedWaitTime: `${Math.ceil(queueItem.position * 2)} minutos`,
       videoTitle: videoInfo.title,
+      videoAuthor: videoInfo.author,
+      videoDuration: videoInfo.duration,
       status: queueItem.status
     });
     
   } catch (error) {
-    console.error('Erro no processamento:', error);
+    console.error('Erro no processamento:', error.message);
+    console.error('Stack:', error.stack);
     
-    res.status(500).json({
+    // Retornar erro mais específico
+    let errorMessage = error.message;
+    let errorCode = 500;
+    
+    if (error.message.includes('Video unavailable')) {
+      errorMessage = 'Vídeo não disponível ou privado';
+      errorCode = 404;
+    } else if (error.message.includes('Sign in to confirm your age')) {
+      errorMessage = 'Vídeo com restrição de idade - não é possível processar';
+      errorCode = 403;
+    } else if (error.message.includes('This live event')) {
+      errorMessage = 'Não é possível processar lives ou premieres';
+      errorCode = 400;
+    } else if (error.message.includes('Private video')) {
+      errorMessage = 'Vídeo privado - não é possível acessar';
+      errorCode = 403;
+    }
+    
+    res.status(errorCode).json({
       error: 'Erro no processamento',
-      message: error.message
+      message: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
