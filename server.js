@@ -39,6 +39,39 @@ const MAX_QUEUE_SIZE = parseInt(process.env.MAX_QUEUE_SIZE || '30');
 const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutos
 const QUEUE_TIMEOUT = 10 * 60 * 1000; // 10 minutos na fila
 
+// Configurações avançadas para bypass
+const BYPASS_CONFIG = {
+  userAgents: [
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (iPad; CPU OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+    'com.google.ios.youtube/19.09.4 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)',
+    'com.google.android.youtube/18.11.34 (Linux; U; Android 11) gzip',
+    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+  ],
+  
+  cookies: [
+    'CONSENT=YES+cb.20210328-17-p0.en+FX+667',
+    'VISITOR_INFO1_LIVE=Uv6ArdWw9g8; YSC=DwKWMpucdkM',
+    'PREF=f4=4000000&tz=America.New_York',
+    'GPS=1; YSC=vjVy8AoB2TM'
+  ]
+};
+
+// Função para obter User-Agent rotativo
+function getRandomUserAgent() {
+  return BYPASS_CONFIG.userAgents[Math.floor(Math.random() * BYPASS_CONFIG.userAgents.length)];
+}
+
+// Função para obter cookies rotativos
+function getRandomCookies() {
+  return BYPASS_CONFIG.cookies[Math.floor(Math.random() * BYPASS_CONFIG.cookies.length)];
+}
+
+// Delay entre tentativas
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Sistema de fila
 class DownloadQueue extends EventEmitter {
   constructor() {
@@ -160,8 +193,8 @@ class DownloadQueue extends EventEmitter {
     
     console.log(`[${queueItem.id}] Iniciando download: ${videoInfo.title} (${videoInfo.duration}s)`);
     
-    // Usar estratégia múltipla
-    const outputFile = await downloadAndConvertAdvanced(youtubeUrl, DOWNLOADS_DIR);
+    // Usar estratégia ultra avançada
+    const outputFile = await downloadAndConvertUltraAdvanced(youtubeUrl, DOWNLOADS_DIR);
     
     console.log(`[${queueItem.id}] Conversão concluída: ${path.basename(outputFile)}`);
     
@@ -289,100 +322,19 @@ async function ensureYtDlp() {
     
     try {
       await fs.access(ytDlpPath);
-      console.log('yt-dlp já está disponível');
       return ytDlpPath;
     } catch {
-      console.log('Baixando yt-dlp...');
+      console.log('📥 Baixando yt-dlp...');
       
-      // Baixar yt-dlp
       await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${ytDlpPath}`);
       await execAsync(`chmod +x ${ytDlpPath}`);
       
-      console.log('yt-dlp baixado com sucesso');
+      console.log('✅ yt-dlp baixado com sucesso');
       return ytDlpPath;
     }
   } catch (error) {
-    console.error('Erro ao configurar yt-dlp:', error);
+    console.error('❌ Erro ao configurar yt-dlp:', error);
     throw new Error('yt-dlp não disponível');
-  }
-}
-
-// Obter informações do vídeo usando yt-dlp
-async function getVideoInfoWithYtDlp(url) {
-  try {
-    console.log('Obtendo informações com yt-dlp...');
-    
-    const ytDlpPath = await ensureYtDlp();
-    const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
-    
-    // Comando para obter apenas informações
-    const infoCommand = `${ytDlpPath} --dump-json --no-download "${cleanUrl}"`;
-    
-    const { stdout } = await execAsync(infoCommand, {
-      timeout: 30000 // 30 segundos
-    });
-    
-    const info = JSON.parse(stdout);
-    
-    return {
-      title: info.title || 'Unknown',
-      duration: parseInt(info.duration) || 300,
-      author: info.uploader || info.channel || 'Unknown'
-    };
-    
-  } catch (error) {
-    console.error('Erro ao obter info com yt-dlp:', error);
-    throw error;
-  }
-}
-
-// Obter informações do vídeo com fallbacks melhorados
-async function getVideoInfo(url) {
-  try {
-    console.log(`Obtendo informações do vídeo: ${url}`);
-    
-    // Limpar URL de parâmetros desnecessários
-    const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
-    console.log(`URL limpa: ${cleanUrl}`);
-    
-    // Primeira tentativa - método padrão com configurações melhoradas
-    const info = await ytdl.getInfo(cleanUrl, {
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-          'Accept-Encoding': 'gzip, deflate',
-          'DNT': '1',
-          'Connection': 'keep-alive',
-          'Upgrade-Insecure-Requests': '1',
-        }
-      }
-    });
-    
-    return {
-      title: info.videoDetails.title,
-      duration: parseInt(info.videoDetails.lengthSeconds),
-      author: info.videoDetails.author.name
-    };
-  } catch (error) {
-    console.log(`ytdl-core falhou: ${error.message}`);
-    
-    // Fallback para yt-dlp
-    try {
-      return await getVideoInfoWithYtDlp(url);
-    } catch (error2) {
-      console.log(`yt-dlp falhou: ${error2.message}`);
-      
-      // Fallback final - usar informações mínimas extraídas da URL
-      const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
-      const videoId = extractVideoId(cleanUrl);
-      return {
-        title: `YouTube Video ${videoId}`,
-        duration: 300, // 5 minutos como estimativa
-        author: 'Unknown'
-      };
-    }
   }
 }
 
@@ -393,7 +345,7 @@ function extractVideoId(url) {
   return match ? match[1] : 'unknown';
 }
 
-// Validar URL do YouTube com mais robustez
+// Validar URL do YouTube
 function validateYouTubeUrl(url) {
   if (!url || typeof url !== 'string') return false;
   
@@ -403,73 +355,226 @@ function validateYouTubeUrl(url) {
     
     return ytdl.validateURL(url);
   } catch (error) {
-    console.log(`Erro na validação: ${error.message}`);
-    
     const regex = /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
     return regex.test(url);
   }
 }
 
-// Download usando yt-dlp
-async function downloadWithYtDlp(youtubeUrl, outputDir) {
+// Função para obter informações com bypass avançado
+async function getVideoInfoWithYtDlpAdvanced(url) {
   try {
-    console.log('🔄 Estratégia 2: Tentando com yt-dlp...');
+    console.log('📋 Obtendo informações com yt-dlp + bypass...');
+    
+    const ytDlpPath = await ensureYtDlp();
+    const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
+    
+    // Estratégias para obter informações
+    const infoStrategies = [
+      `${ytDlpPath} --dump-json --no-download --extractor-args "youtube:player_client=ios" --user-agent "${BYPASS_CONFIG.userAgents[2]}" "${cleanUrl}"`,
+      `${ytDlpPath} --dump-json --no-download --extractor-args "youtube:player_client=android" --user-agent "${BYPASS_CONFIG.userAgents[3]}" "${cleanUrl}"`,
+      `${ytDlpPath} --dump-json --no-download --user-agent "${getRandomUserAgent()}" --add-header "Cookie:${getRandomCookies()}" "${cleanUrl}"`,
+      `${ytDlpPath} --dump-json --no-download --extractor-args "youtube:player_client=tv" "${cleanUrl}"`
+    ];
+    
+    for (let i = 0; i < infoStrategies.length; i++) {
+      try {
+        console.log(`🔧 Info tentativa ${i + 1}/4`);
+        
+        if (i > 0) {
+          await delay(2000);
+        }
+        
+        const { stdout } = await execAsync(infoStrategies[i], {
+          timeout: 30000
+        });
+        
+        const info = JSON.parse(stdout);
+        
+        console.log(`✅ Informações obtidas com estratégia ${i + 1}`);
+        
+        return {
+          title: info.title || 'Unknown',
+          duration: parseInt(info.duration) || 300,
+          author: info.uploader || info.channel || 'Unknown'
+        };
+        
+      } catch (error) {
+        console.log(`❌ Info estratégia ${i + 1} falhou`);
+        
+        if (error.message.includes('429')) {
+          await delay(5000);
+        }
+        
+        continue;
+      }
+    }
+    
+    throw new Error('Todas as estratégias de info falharam');
+    
+  } catch (error) {
+    console.error('❌ Erro ao obter info com yt-dlp avançado:', error);
+    throw error;
+  }
+}
+
+// Obter informações do vídeo com fallbacks
+async function getVideoInfoAdvanced(url) {
+  try {
+    console.log(`📋 Obtendo informações do vídeo: ${url}`);
+    
+    const cleanUrl = url.split('&list=')[0].split('&start_radio=')[0];
+    console.log(`🧹 URL limpa: ${cleanUrl}`);
+    
+    // Tentar ytdl-core primeiro (rápido)
+    try {
+      const info = await ytdl.getInfo(cleanUrl, {
+        requestOptions: {
+          headers: {
+            'User-Agent': getRandomUserAgent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+          }
+        }
+      });
+      
+      return {
+        title: info.videoDetails.title,
+        duration: parseInt(info.videoDetails.lengthSeconds),
+        author: info.videoDetails.author.name
+      };
+    } catch (error) {
+      console.log(`❌ ytdl-core info falhou: ${error.message.split('\n')[0]}`);
+    }
+    
+    // Fallback para yt-dlp avançado
+    try {
+      return await getVideoInfoWithYtDlpAdvanced(url);
+    } catch (error2) {
+      console.log(`❌ yt-dlp info falhou: ${error2.message.split('\n')[0]}`);
+      
+      // Fallback final
+      const videoId = extractVideoId(cleanUrl);
+      return {
+        title: `YouTube Video ${videoId}`,
+        duration: 300,
+        author: 'Unknown'
+      };
+    }
+  } catch (error) {
+    console.error('❌ Erro crítico ao obter informações:', error);
+    throw error;
+  }
+}
+
+// Download com yt-dlp e bypass avançado
+async function downloadWithYtDlpAdvanced(youtubeUrl, outputDir) {
+  try {
+    console.log('🔄 Estratégia 2: Tentando com yt-dlp + bypass...');
     
     const ytDlpPath = await ensureYtDlp();
     const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
     const outputFile = path.join(outputDir, generateUniqueFilename('wav'));
     
-    // Comando yt-dlp para extrair áudio diretamente como WAV
-    const ytDlpCommand = `${ytDlpPath} --extract-audio --audio-format wav --audio-quality 0 --output "${outputFile.replace('.wav', '.%(ext)s')}" "${cleanUrl}"`;
+    // Estratégias de bypass
+    const strategies = [
+      {
+        name: 'iOS Client',
+        command: `${ytDlpPath} --extract-audio --audio-format wav --audio-quality 0 --extractor-args "youtube:player_client=ios" --user-agent "${BYPASS_CONFIG.userAgents[2]}" --output "${outputFile.replace('.wav', '.%(ext)s')}" "${cleanUrl}"`
+      },
+      {
+        name: 'Android Client',
+        command: `${ytDlpPath} --extract-audio --audio-format wav --audio-quality 0 --extractor-args "youtube:player_client=android" --user-agent "${BYPASS_CONFIG.userAgents[3]}" --output "${outputFile.replace('.wav', '.%(ext)s')}" "${cleanUrl}"`
+      },
+      {
+        name: 'Headers + Cookies',
+        command: `${ytDlpPath} --extract-audio --audio-format wav --audio-quality 0 --user-agent "${getRandomUserAgent()}" --add-header "Cookie:${getRandomCookies()}" --sleep-interval 1 --max-sleep-interval 3 --output "${outputFile.replace('.wav', '.%(ext)s')}" "${cleanUrl}"`
+      },
+      {
+        name: 'Web Embed',
+        command: `${ytDlpPath} --extract-audio --audio-format wav --audio-quality 0 --extractor-args "youtube:player_client=web" --referer "https://www.youtube.com/" --user-agent "${getRandomUserAgent()}" --output "${outputFile.replace('.wav', '.%(ext)s')}" "${cleanUrl}"`
+      },
+      {
+        name: 'TV Client',
+        command: `${ytDlpPath} --extract-audio --audio-format wav --audio-quality 0 --extractor-args "youtube:player_client=tv" --output "${outputFile.replace('.wav', '.%(ext)s')}" "${cleanUrl}"`
+      }
+    ];
     
-    console.log('Executando yt-dlp...');
-    await execAsync(ytDlpCommand, {
-      timeout: 15 * 60 * 1000 // 15 minutos timeout
-    });
-    
-    // Encontrar o arquivo gerado (yt-dlp pode mudar o nome)
-    const files = await fs.readdir(outputDir);
-    const generatedFile = files.find(file => 
-      file.includes(path.basename(outputFile, '.wav')) && file.endsWith('.wav')
-    );
-    
-    if (!generatedFile) {
-      throw new Error('Arquivo não foi gerado pelo yt-dlp');
+    // Tentar cada estratégia
+    for (let i = 0; i < strategies.length; i++) {
+      const strategy = strategies[i];
+      
+      try {
+        console.log(`🔧 Tentativa ${i + 1}/5: ${strategy.name}`);
+        
+        if (i > 0) {
+          const delayTime = Math.random() * 3000 + 2000; // 2-5 segundos
+          console.log(`⏳ Aguardando ${Math.round(delayTime/1000)}s para evitar rate limit...`);
+          await delay(delayTime);
+        }
+        
+        await execAsync(strategy.command, {
+          timeout: 15 * 60 * 1000
+        });
+        
+        // Encontrar o arquivo gerado
+        const files = await fs.readdir(outputDir);
+        const generatedFile = files.find(file => 
+          file.includes(path.basename(outputFile, '.wav')) && file.endsWith('.wav')
+        );
+        
+        if (!generatedFile) {
+          console.log(`❌ ${strategy.name}: Arquivo não gerado`);
+          continue;
+        }
+        
+        const finalFile = path.join(outputDir, generatedFile);
+        console.log(`✅ ${strategy.name} funcionou: ${path.basename(finalFile)}`);
+        
+        return finalFile;
+        
+      } catch (error) {
+        console.log(`❌ ${strategy.name} falhou: ${error.message.split('\n')[0]}`);
+        
+        if (error.message.includes('429') || error.message.includes('Too Many Requests')) {
+          console.log('⏳ Rate limit detectado, aguardando 10s...');
+          await delay(10000);
+        }
+        
+        continue;
+      }
     }
     
-    const finalFile = path.join(outputDir, generatedFile);
-    console.log(`✅ yt-dlp concluído: ${path.basename(finalFile)}`);
-    
-    return finalFile;
+    throw new Error('Todas as estratégias de bypass falharam');
     
   } catch (error) {
-    console.error('❌ Erro com yt-dlp:', error);
-    throw new Error(`yt-dlp falhou: ${error.message}`);
+    console.error('❌ Erro com yt-dlp avançado:', error);
+    throw new Error(`yt-dlp avançado falhou: ${error.message}`);
   }
 }
 
-// Download e conversão do áudio com múltiplos fallbacks
+// Download básico com ytdl-core
 async function downloadAndConvert(youtubeUrl, outputDir) {
   const tempAudioFile = path.join(outputDir, generateUniqueFilename('mp4'));
   const outputFile = path.join(outputDir, generateUniqueFilename('wav'));
   
-  // Limpar URL
   const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
   
   return new Promise((resolve, reject) => {
     try {
       console.log(`🔄 Estratégia 1: Tentando com ytdl-core...`);
-      console.log(`Iniciando download de: ${cleanUrl}`);
       
-      // Configurações otimizadas para download com múltiplos fallbacks
       const downloadOptions = {
         filter: 'audioonly',
         quality: 'highestaudio',
-        highWaterMark: 1 << 25, // 32MB buffer
+        highWaterMark: 1 << 25,
         requestOptions: {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Cookie': 'CONSENT=YES+cb.20210328-17-p0.en+FX+667;',
+            'User-Agent': getRandomUserAgent(),
+            'Cookie': getRandomCookies(),
             'Accept': '*/*',
             'Accept-Language': 'en-US,en;q=0.9',
             'Referer': 'https://www.youtube.com/',
@@ -478,158 +583,92 @@ async function downloadAndConvert(youtubeUrl, outputDir) {
         }
       };
       
-      let audioStream;
       let attempt = 0;
-      const maxAttempts = 3;
+      const maxAttempts = 2;
       
       const tryDownload = () => {
         attempt++;
         console.log(`Tentativa de download ${attempt}/${maxAttempts}`);
         
         try {
-          audioStream = ytdl(cleanUrl, downloadOptions);
+          const audioStream = ytdl(cleanUrl, downloadOptions);
           const writeStream = require('fs').createWriteStream(tempAudioFile);
           
-          // Timeout para downloads muito longos
           const timeout = setTimeout(() => {
-            if (audioStream) audioStream.destroy();
-            if (writeStream) writeStream.destroy();
-            
-            if (attempt < maxAttempts) {
-              console.log(`Timeout na tentativa ${attempt}, tentando novamente...`);
-              setTimeout(tryDownload, 2000); // Esperar 2s antes de tentar novamente
-            } else {
-              reject(new Error('Download timeout após múltiplas tentativas'));
-            }
-          }, 10 * 60 * 1000); // 10 minutos
+            audioStream.destroy();
+            writeStream.destroy();
+            reject(new Error('Download timeout'));
+          }, 10 * 60 * 1000);
           
           audioStream.pipe(writeStream);
           
           audioStream.on('error', (error) => {
             clearTimeout(timeout);
             writeStream.destroy();
-            console.error(`Erro no stream de áudio (tentativa ${attempt}):`, error.message);
             
-            if (attempt < maxAttempts && (error.statusCode === 410 || error.statusCode === 403)) {
-              console.log(`Tentando novamente com configurações diferentes...`);
-              
-              // Mudar configurações para próxima tentativa
-              downloadOptions.requestOptions.headers['User-Agent'] = 
-                `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`;
-              
-              setTimeout(tryDownload, 3000); // Esperar 3s
+            if (attempt < maxAttempts && (error.statusCode === 410 || error.statusCode === 403 || error.statusCode === 429)) {
+              downloadOptions.requestOptions.headers['User-Agent'] = getRandomUserAgent();
+              setTimeout(tryDownload, 3000);
             } else {
-              reject(new Error(`Erro no download após ${attempt} tentativas: ${error.message}`));
-            }
-          });
-          
-          audioStream.on('info', (info) => {
-            console.log(`Download iniciado: ${info.videoDetails.title}`);
-          });
-          
-          audioStream.on('progress', (chunkLength, downloaded, total) => {
-            const percent = downloaded / total;
-            if (percent % 0.1 < 0.01) { // Log a cada 10%
-              console.log(`Download progress: ${(percent * 100).toFixed(1)}%`);
+              reject(new Error(`ytdl-core falhou: ${error.message}`));
             }
           });
           
           writeStream.on('finish', async () => {
             clearTimeout(timeout);
-            console.log('Download concluído, iniciando conversão...');
             
             try {
-              // Verificar se arquivo foi baixado
               const stats = await fs.stat(tempAudioFile);
               if (stats.size === 0) {
                 throw new Error('Arquivo baixado está vazio');
               }
               
-              console.log(`Arquivo baixado: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
-              
-              // Converter para WAV usando FFmpeg
               const ffmpegCommand = `ffmpeg -i "${tempAudioFile}" -acodec pcm_s16le -ar 44100 -ac 2 "${outputFile}"`;
+              await execAsync(ffmpegCommand, { timeout: 10 * 60 * 1000 });
               
-              console.log('Executando FFmpeg...');
-              await execAsync(ffmpegCommand, {
-                timeout: 10 * 60 * 1000 // 10 minutos timeout
-              });
-              
-              // Verificar se conversão foi bem-sucedida
-              const convertedStats = await fs.stat(outputFile);
-              if (convertedStats.size === 0) {
-                throw new Error('Conversão resultou em arquivo vazio');
-              }
-              
-              console.log(`✅ Conversão concluída: ${(convertedStats.size / 1024 / 1024).toFixed(2)} MB`);
-              
-              // Remover arquivo temporário
               await fs.unlink(tempAudioFile);
-              
               resolve(outputFile);
             } catch (error) {
-              console.error('Erro na conversão:', error);
-              
-              // Limpar arquivos em caso de erro
-              try {
-                await fs.unlink(tempAudioFile);
-                await fs.unlink(outputFile);
-              } catch {} // Ignorar erros de limpeza
-              
               reject(new Error(`Erro na conversão: ${error.message}`));
             }
           });
           
-          writeStream.on('error', (error) => {
-            clearTimeout(timeout);
-            console.error(`Erro no stream de escrita (tentativa ${attempt}):`, error);
-            
-            if (attempt < maxAttempts) {
-              setTimeout(tryDownload, 2000);
-            } else {
-              reject(new Error(`Erro ao salvar arquivo: ${error.message}`));
-            }
-          });
-          
         } catch (error) {
-          console.error(`Erro geral na tentativa ${attempt}:`, error);
-          
-          if (attempt < maxAttempts) {
-            setTimeout(tryDownload, 3000);
-          } else {
-            reject(new Error(`Erro no processo após ${attempt} tentativas: ${error.message}`));
-          }
+          reject(new Error(`Erro crítico: ${error.message}`));
         }
       };
       
       tryDownload();
       
     } catch (error) {
-      console.error('Erro crítico no download:', error);
       reject(new Error(`Erro crítico: ${error.message}`));
     }
   });
 }
 
-// Função principal com estratégias múltiplas
-async function downloadAndConvertAdvanced(youtubeUrl, outputDir) {
+// Função principal com estratégias ultra avançadas
+async function downloadAndConvertUltraAdvanced(youtubeUrl, outputDir) {
   const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
   
-  // Estratégia 1: Tentar ytdl-core primeiro
+  // Estratégia 1: ytdl-core rápido
   try {
+    console.log(`🔄 Estratégia 1: ytdl-core rápido...`);
     return await downloadAndConvert(youtubeUrl, outputDir);
   } catch (error) {
-    console.log(`❌ ytdl-core falhou: ${error.message}`);
+    console.log(`❌ ytdl-core falhou: ${error.message.split('\n')[0]}`);
   }
   
-  // Estratégia 2: Usar yt-dlp como fallback
+  // Estratégia 2: yt-dlp com bypass avançado
   try {
-    return await downloadWithYtDlp(cleanUrl, outputDir);
+    return await downloadWithYtDlpAdvanced(cleanUrl, outputDir);
   } catch (error) {
-    console.log(`❌ yt-dlp falhou: ${error.message}`);
+    console.log(`❌ yt-dlp avançado falhou: ${error.message.split('\n')[0]}`);
   }
   
-  throw new Error('❌ Todas as estratégias de download falharam');
+  console.log('🔄 Estratégia 3: Todas as estratégias locais falharam');
+  console.log('💡 Sugestão: Vídeo pode ter restrições geográficas ou de idade');
+  
+  throw new Error('❌ Todas as estratégias avançadas falharam');
 }
 
 // Endpoint principal
@@ -640,7 +679,6 @@ app.post('/convert-youtube', async (req, res) => {
   console.log('Recebida requisição de conversão:', youtubeUrl);
   console.log('Timestamp:', new Date().toISOString());
   
-  // Validações
   if (!validateYouTubeUrl(youtubeUrl)) {
     console.log('URL inválida:', youtubeUrl);
     return res.status(400).json({
@@ -652,11 +690,9 @@ app.post('/convert-youtube', async (req, res) => {
   try {
     console.log('Obtendo informações do vídeo...');
     
-    // Obter informações do vídeo com fallbacks
-    const videoInfo = await getVideoInfo(youtubeUrl);
+    const videoInfo = await getVideoInfoAdvanced(youtubeUrl);
     console.log('Informações obtidas:', videoInfo);
     
-    // Verificar duração (máximo 30 minutos)
     if (videoInfo.duration > 1800) {
       console.log('Vídeo muito longo:', videoInfo.duration, 'segundos');
       return res.status(400).json({
@@ -667,7 +703,6 @@ app.post('/convert-youtube', async (req, res) => {
     
     console.log('Adicionando à fila de processamento...');
     
-    // Adicionar à fila
     const queueId = downloadQueue.enqueue({
       youtubeUrl,
       videoInfo
@@ -690,9 +725,7 @@ app.post('/convert-youtube', async (req, res) => {
     
   } catch (error) {
     console.error('Erro no processamento:', error.message);
-    console.error('Stack:', error.stack);
     
-    // Retornar erro mais específico
     let errorMessage = error.message;
     let errorCode = 500;
     
@@ -712,8 +745,7 @@ app.post('/convert-youtube', async (req, res) => {
     
     res.status(errorCode).json({
       error: 'Erro no processamento',
-      message: errorMessage,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      message: errorMessage
     });
   }
 });
@@ -758,14 +790,11 @@ app.get('/download/:queueId', async (req, res) => {
     const filePath = item.result.outputFile;
     const filename = item.result.filename;
     
-    // Verificar se arquivo existe
     await fs.access(filePath);
     
-    // Configurar headers para download
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'audio/wav');
     
-    // Enviar arquivo
     res.sendFile(filePath, async (err) => {
       if (err) {
         console.error('Erro ao enviar arquivo:', err);
@@ -775,7 +804,6 @@ app.get('/download/:queueId', async (req, res) => {
       } else {
         console.log(`[${queueId}] Arquivo enviado com sucesso`);
         
-        // Remover item da fila e arquivo do servidor após envio
         downloadQueue.removeCompletedItem(queueId);
         
         try {
@@ -835,7 +863,6 @@ async function startServer() {
   try {
     await ensureDownloadsDir();
     
-    // Tentar configurar yt-dlp na inicialização
     try {
       await ensureYtDlp();
       console.log('✅ yt-dlp configurado com sucesso');
@@ -843,7 +870,6 @@ async function startServer() {
       console.log('⚠️  yt-dlp não disponível, usando apenas ytdl-core');
     }
     
-    // Configurar limpeza automática
     setInterval(cleanupOldFiles, CLEANUP_INTERVAL);
     setInterval(() => downloadQueue.cleanupQueue(), CLEANUP_INTERVAL);
     
@@ -853,7 +879,7 @@ async function startServer() {
       console.log(`📁 Diretório de downloads: ${DOWNLOADS_DIR}`);
       console.log(`⚡ Máximo de downloads simultâneos: ${MAX_CONCURRENT_DOWNLOADS}`);
       console.log(`📋 Tamanho máximo da fila: ${MAX_QUEUE_SIZE}`);
-      console.log(`🔧 Estratégias: ytdl-core + yt-dlp fallback`);
+      console.log(`🔧 Estratégias: ytdl-core + yt-dlp + bypass avançado`);
     });
     
   } catch (error) {
