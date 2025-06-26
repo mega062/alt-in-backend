@@ -1,57 +1,82 @@
-FROM node:18
+# Dockerfile
+FROM node:18-slim
 
-# Instalar dependências do sistema
+# Instalar dependências do sistema necessárias para o Chrome
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    pulseaudio \
-    xvfb \
-    x11vnc \
-    fluxbox \
     wget \
     gnupg \
+    ca-certificates \
+    procps \
+    libxss1 \
+    libgconf-2-4 \
+    libxrandr2 \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libatk1.0-0 \
+    libcairo-gobject2 \
+    libgtk-3-0 \
+    libgdk-pixbuf2.0-0 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxi6 \
+    libxtst6 \
+    libnss3 \
+    libcups2 \
+    libxrandr2 \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libatk1.0-0 \
+    libcairo-gobject2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libatspi2.0-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxss1 \
+    libgbm1 \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar Chrome
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+# Instalar Google Chrome
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
     && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
     && apt-get update \
     && apt-get install -y google-chrome-stable fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf libxss1 \
+      --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Configurar variáveis de ambiente para Puppeteer
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+# Criar usuário não-root
+RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
+    && mkdir -p /home/pptruser/Downloads \
+    && chown -R pptruser:pptruser /home/pptruser
 
-# Configurar PulseAudio
-RUN echo "load-module module-null-sink sink_name=virtual-speakers" >> /etc/pulse/default.pa
-
-# Criar pasta de trabalho
+# Definir diretório de trabalho
 WORKDIR /app
 
-# Copiar package.json
+# Copiar package files
 COPY package*.json ./
 
-# Instalar dependências
-RUN npm install
+# Instalar dependências do Node.js
+RUN npm ci --only=production && npm cache clean --force
 
-# Copiar código
+# Copiar código da aplicação
 COPY . .
 
-# Criar script de inicialização
-RUN echo '#!/bin/bash\n\
-# Iniciar X virtual display\n\
-Xvfb :99 -screen 0 1280x720x16 &\n\
-export DISPLAY=:99\n\
-\n\
-# Iniciar PulseAudio\n\
-pulseaudio --start --exit-idle-time=-1 &\n\
-\n\
-# Aguardar um pouco\n\
-sleep 2\n\
-\n\
-# Iniciar aplicação\n\
-node server.js' > /app/start.sh && chmod +x /app/start.sh
+# Criar diretório de downloads
+RUN mkdir -p downloads && chown -R pptruser:pptruser /app
 
-EXPOSE 3000
+# Mudar para usuário não-root
+USER pptruser
 
-CMD ["/app/start.sh"]
+# Variáveis de ambiente
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome
+ENV NODE_ENV=production
+ENV DISPLAY=:99
+
+# Expor porta
+EXPOSE 10000
+
+# Comando de inicialização
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset & node server.js"]
