@@ -1,73 +1,41 @@
-# Dockerfile simplificado sem X server
-FROM node:18-slim
+# Dockerfile mínimo e funcional
+FROM node:18
 
-# Instalar dependências do sistema necessárias para o Chrome
+# Instalar Chrome
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
-    ca-certificates \
-    libxss1 \
-    libgconf-2-4 \
-    libxrandr2 \
-    libasound2 \
-    libpangocairo-1.0-0 \
-    libatk1.0-0 \
-    libcairo-gobject2 \
-    libgtk-3-0 \
-    libgdk-pixbuf2.0-0 \
-    libxcomposite1 \
-    libxcursor1 \
-    libxdamage1 \
-    libxi6 \
-    libxtst6 \
-    libnss3 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libatspi2.0-0 \
-    libxfixes3 \
-    libgbm1 \
-    fonts-liberation \
-    fonts-noto-color-emoji \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates
 
-# Instalar Google Chrome
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
-      --no-install-recommends \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list
+
+RUN apt-get update && apt-get install -y \
+    google-chrome-stable \
+    libxss1 \
+    libasound2 \
+    libgtk-3-0 \
+    libnss3 \
+    libgbm1 \
+    --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Criar usuário não-root
-RUN groupadd -r appuser && useradd -r -g appuser -G audio,video appuser \
-    && mkdir -p /home/appuser \
-    && chown -R appuser:appuser /home/appuser
-
-# Definir diretório de trabalho
 WORKDIR /app
 
-# Copiar package files
-COPY package*.json ./
+# Instalar dependências com versões corretas
+RUN npm install express@4.18.2 puppeteer@24.10.2 puppeteer-stream@3.0.20
 
-# Instalar dependências do Node.js
-RUN npm ci --only=production && npm cache clean --force
-
-# Copiar código da aplicação
-COPY . .
+# Copiar apenas o server.js
+COPY server.js ./
 
 # Criar diretório de downloads
-RUN mkdir -p downloads && chown -R appuser:appuser /app
-
-# Mudar para usuário não-root
-USER appuser
+RUN mkdir -p downloads
 
 # Variáveis de ambiente
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome
 ENV NODE_ENV=production
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
-# Expor porta
 EXPOSE 10000
 
-# Comando de inicialização simples
 CMD ["node", "server.js"]

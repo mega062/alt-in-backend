@@ -14,7 +14,7 @@ let launch, getStream;
 if (isProd) {
   // Em produção, usar puppeteer com configuração otimizada para serverless
   const puppeteer = require('puppeteer');
-  const puppeteerStream = require('puppeteer-stream');
+  const { getStream } = require('puppeteer-stream');
   
   launch = async (options = {}) => {
     return await puppeteer.launch({
@@ -66,12 +66,13 @@ if (isProd) {
     });
   };
   
-  getStream = puppeteerStream.getStream;
+  // Usar getStream diretamente
+  getStream = getStream;
 } else {
   // Em desenvolvimento, usar configuração padrão
-  const puppeteerStream = require('puppeteer-stream');
-  launch = puppeteerStream.launch;
-  getStream = puppeteerStream.getStream;
+  const { launch: puppeteerLaunch, getStream: puppeteerGetStream } = require('puppeteer-stream');
+  launch = puppeteerLaunch;
+  getStream = puppeteerGetStream;
 }
 
 const app = express();
