@@ -1,17 +1,12 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
-const { getStream } = require('puppeteer-stream');
-const { exec } = require('child_process');
 const { promisify } = require('util');
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs').promises;
-const fsSyncStream = require('fs');
-const ffmpeg = require('fluent-ffmpeg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const execAsync = promisify(exec);
 
 // ======================================================
 // CONFIGURAÇÕES
@@ -56,7 +51,7 @@ function validateYouTubeUrl(url) {
   return regex.test(url);
 }
 
-function generateUniqueFilename(extension = 'wav') {
+function generateUniqueFilename(extension = 'webm') {
   const timestamp = Date.now();
   const random = crypto.randomBytes(4).toString('hex');
   return `beat_${timestamp}_${random}.${extension}`;
@@ -71,10 +66,10 @@ async function ensureDownloadsDir() {
 }
 
 // ======================================================
-// CORE: GRAVAÇÃO COM PUPPETEER-STREAM
+// CORE: PUPPETEER PURO - GRAVAÇÃO DIRETA
 // ======================================================
 
-async function captureAudioStream(youtubeUrl, recordingInfo) {
+async function recordAudioDirect(youtubeUrl, recordingInfo) {
   const browser = await puppeteer.launch({
     headless: 'new',
     args: [
@@ -93,13 +88,15 @@ async function captureAudioStream(youtubeUrl, recordingInfo) {
       '--disable-translate',
       '--disable-extensions',
       '--no-first-run',
-      '--no-default-browser-check'
+      '--no-default-browser-check',
+      '--use-fake-ui-for-media-stream',
+      '--use-fake-device-for-media-stream',
+      '--allow-file-access-from-files'
     ]
   });
 
   let page;
   const outputFile = path.join(DOWNLOADS_DIR, generateUniqueFilename());
-  const tempWebm = path.join(DOWNLOADS_DIR, generateUniqueFilename('webm'));
 
   try {
     recordingInfo.status = 'opening_browser';
@@ -110,14 +107,13 @@ async function captureAudioStream(youtubeUrl, recordingInfo) {
     await page.setViewport({ width: 1280, height: 720 });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
-    // ✅ Interceptação mínima - só bloquear anúncios pesados
+    // ✅ Interceptação mínima - só anúncios pesados
     await page.setRequestInterception(true);
     page.on('request', (req) => {
-      const resourceType = req.resourceType();
       const url = req.url();
       
-      // Permitir tudo do YouTube, bloquear apenas anúncios óbvios
-      if (url.includes('googlesyndication') || url.includes('doubleclick')) {
+      // Bloquear só anúncios pesados
+      if (url.includes('googlesyndication') || url.includes('doubleclick') || url.includes('googletagservices')) {
         req.abort();
       } else {
         req.continue();
@@ -125,239 +121,192 @@ async function captureAudioStream(youtubeUrl, recordingInfo) {
     });
 
     recordingInfo.status = 'loading_video';
-    recordingInfo.message = 'Carregando vídeo...';
+    recordingInfo.message = 'Carregando YouTube...';
 
     const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
-    console.log(`🎵 URL limpa: ${cleanUrl}`);
+    console.log(`🎵 Abrindo: ${cleanUrl}`);
 
     await page.goto(cleanUrl, { 
       waitUntil: 'networkidle2',
       timeout: 90000 
     });
 
-    // ✅ Aguardar carregamento do player
+    // ✅ Aguardar página carregar
     console.log('⏳ Aguardando player carregar...');
     await new Promise(resolve => setTimeout(resolve, 8000));
 
     recordingInfo.status = 'preparing_recording';
-    recordingInfo.message = 'Preparando captura de áudio...';
+    recordingInfo.message = 'Preparando gravação...';
 
-    // ✅ Obter informações do vídeo de forma simples
-    const videoInfo = await page.evaluate(() => {
-      // Título da página
+    // ✅ Pegar informações básicas
+    const pageInfo = await page.evaluate(() => {
       let title = document.title.replace(' - YouTube', '').trim();
       
-      // Tentar pegar de meta tags
       const ogTitle = document.querySelector('meta[property="og:title"]');
       if (ogTitle && ogTitle.content) {
         title = ogTitle.content;
       }
       
-      // Autor de meta tags
       let author = 'Unknown';
       const authorMeta = document.querySelector('meta[name="author"]');
       if (authorMeta && authorMeta.content) {
         author = authorMeta.content;
       }
       
-      // Duração estimada (será ajustada durante gravação)
-      let duration = 300; // Default 5 minutos
-      
       return {
-        title: title || 'Unknown',
+        title: title || 'Unknown Beat',
         author: author,
-        duration: duration
+        url: window.location.href
       };
     });
 
-    recordingInfo.videoTitle = videoInfo.title;
-    recordingInfo.videoAuthor = videoInfo.author;
-    recordingInfo.videoDuration = videoInfo.duration;
+    recordingInfo.videoTitle = pageInfo.title;
+    recordingInfo.videoAuthor = pageInfo.author;
 
-    console.log(`🎵 Informações obtidas: ${videoInfo.title} por ${videoInfo.author}`);
+    console.log(`🎵 Detectado: ${pageInfo.title} por ${pageInfo.author}`);
 
     recordingInfo.status = 'recording';
-    recordingInfo.message = 'Iniciando captura de áudio...';
-    recordingInfo.progress = 5;
-
-    // ✅ CAPTURA DE ÁUDIO COM PUPPETEER-STREAM
-    console.log('🎤 Iniciando stream de áudio...');
-    
-    const stream = await getStream({ 
-      page, 
-      audio: true, 
-      video: false,
-      audioBitsPerSecond: 128000, // ✅ Qualidade alta
-      mimeType: 'audio/webm'
-    });
-
-    const file = fsSyncStream.createWriteStream(tempWebm);
-    stream.pipe(file);
-
+    recordingInfo.message = 'Iniciando gravação direta...';
     recordingInfo.progress = 10;
-    recordingInfo.message = 'Gravando áudio em tempo real...';
 
-    console.log(`🔴 Stream de áudio iniciado, salvando em: ${path.basename(tempWebm)}`);
-
-    // ✅ Tentar iniciar reprodução automática (sem depender de seletores)
-    try {
-      await page.evaluate(() => {
-        // Tentar várias formas de iniciar o áudio
-        const videos = document.querySelectorAll('video');
-        videos.forEach(video => {
-          if (video) {
-            video.muted = false;
-            video.volume = 1.0;
-            video.play().catch(() => {});
-          }
-        });
-
-        // Tentar clicar em play buttons
-        const playButtons = document.querySelectorAll(
-          '.ytp-play-button, [aria-label*="play"], [aria-label*="Play"], button[title*="play"]'
-        );
-        playButtons.forEach(btn => {
-          try {
-            btn.click();
-          } catch (e) {}
-        });
-
-        // Simular tecla de espaço para play
-        document.body.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
-      });
-      
-      console.log('✅ Tentativas de reprodução executadas');
-    } catch (error) {
-      console.log('⚠️ Erro ao tentar iniciar reprodução:', error.message);
-    }
-
-    // ✅ Monitoramento do stream
-    let streamEnded = false;
-    let capturedDuration = 0;
-    const startTime = Date.now();
-    const maxDuration = 10 * 60 * 1000; // 10 minutos máximo
-
-    const progressInterval = setInterval(() => {
-      if (streamEnded) return;
-
-      const elapsed = Date.now() - startTime;
-      capturedDuration = Math.round(elapsed / 1000);
-      
-      // Progresso baseado no tempo decorrido (máximo 10 min)
-      const progress = Math.min(10 + (elapsed / maxDuration) * 80, 90);
-      
-      recordingInfo.progress = Math.round(progress);
-      recordingInfo.message = `Gravando... ${capturedDuration}s capturados`;
-      recordingInfo.videoDuration = capturedDuration; // Atualizar duração real
-
-      console.log(`📊 Gravação em andamento: ${capturedDuration}s (${Math.round(progress)}%)`);
-    }, 2000);
-
-    // ✅ Aguardar fim do stream ou timeout
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        console.log('⏰ Timeout atingido, finalizando gravação...');
-        streamEnded = true;
-        stream.destroy();
-        resolve();
-      }, maxDuration);
-
-      stream.on('end', () => {
-        console.log('🏁 Stream terminou naturalmente');
-        clearTimeout(timeout);
-        streamEnded = true;
-        resolve();
-      });
-
-      stream.on('error', (error) => {
-        console.error('❌ Erro no stream:', error);
-        clearTimeout(timeout);
-        streamEnded = true;
-        reject(error);
-      });
-
-      // Detectar fim do vídeo verificando se ainda há áudio
-      let silenceCount = 0;
-      const silenceCheck = setInterval(async () => {
+    // ✅ GRAVAÇÃO DIRETA COM PUPPETEER - USANDO MEDIA RECORDER API
+    const audioData = await page.evaluate(async () => {
+      return new Promise(async (resolve, reject) => {
         try {
-          const isPlaying = await page.evaluate(() => {
-            const videos = document.querySelectorAll('video');
-            return Array.from(videos).some(v => !v.paused && !v.ended);
+          console.log('🎤 Iniciando captura de áudio...');
+
+          // ✅ Capturar áudio da aba atual
+          const stream = await navigator.mediaDevices.getDisplayMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              sampleRate: 44100
+            },
+            video: false
           });
 
-          if (!isPlaying) {
-            silenceCount++;
-            if (silenceCount > 3) { // 6 segundos de silêncio
-              console.log('🔇 Vídeo pausado/terminado, finalizando stream...');
-              clearInterval(silenceCheck);
-              clearTimeout(timeout);
-              streamEnded = true;
-              stream.destroy();
-              resolve();
+          // ✅ Configurar MediaRecorder
+          const recorder = new MediaRecorder(stream, {
+            mimeType: 'audio/webm;codecs=opus',
+            audioBitsPerSecond: 128000
+          });
+
+          const chunks = [];
+          let recordingStarted = false;
+
+          recorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+              chunks.push(event.data);
+              console.log(`📊 Chunk gravado: ${event.data.size} bytes`);
             }
-          } else {
-            silenceCount = 0;
-          }
-        } catch (e) {
-          // Ignorar erros de verificação
+          };
+
+          recorder.onstop = () => {
+            console.log('🛑 Gravação finalizada');
+            const blob = new Blob(chunks, { type: 'audio/webm' });
+            
+            // Converter blob para ArrayBuffer
+            const reader = new FileReader();
+            reader.onload = () => {
+              const arrayBuffer = reader.result;
+              const uint8Array = new Uint8Array(arrayBuffer);
+              resolve(Array.from(uint8Array));
+            };
+            reader.readAsArrayBuffer(blob);
+          };
+
+          recorder.onerror = (error) => {
+            console.error('❌ Erro na gravação:', error);
+            reject(error);
+          };
+
+          // ✅ Iniciar gravação
+          recorder.start(1000); // Chunk a cada 1 segundo
+          recordingStarted = true;
+          console.log('🔴 Gravação iniciada!');
+
+          // ✅ Tentar tocar o vídeo
+          const videos = document.querySelectorAll('video');
+          videos.forEach(video => {
+            if (video) {
+              video.muted = false;
+              video.volume = 1.0;
+              video.currentTime = 0;
+              video.play().then(() => {
+                console.log('▶️ Vídeo tocando');
+              }).catch(e => {
+                console.log('⚠️ Erro ao tocar vídeo:', e);
+              });
+            }
+          });
+
+          // ✅ Tentar clicar em botões de play
+          const playButtons = document.querySelectorAll(
+            '.ytp-play-button, [aria-label*="play"], [aria-label*="Play"], button[title*="play"]'
+          );
+          playButtons.forEach(btn => {
+            try {
+              btn.click();
+              console.log('🖱️ Clicou em botão de play');
+            } catch (e) {}
+          });
+
+          // ✅ Simular tecla espaço
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
+
+          // ✅ Determinar quando parar a gravação
+          let duration = 0;
+          let silenceCount = 0;
+          
+          const checkInterval = setInterval(() => {
+            duration += 2;
+            
+            // Verificar se vídeo está tocando
+            const playingVideos = Array.from(document.querySelectorAll('video')).filter(v => !v.paused && !v.ended);
+            
+            if (playingVideos.length === 0) {
+              silenceCount++;
+              console.log(`🔇 Sem vídeos tocando (${silenceCount}/5)`);
+              
+              if (silenceCount >= 5) { // 10 segundos sem áudio
+                console.log('🛑 Parando gravação - sem áudio detectado');
+                clearInterval(checkInterval);
+                recorder.stop();
+                stream.getTracks().forEach(track => track.stop());
+              }
+            } else {
+              silenceCount = 0;
+            }
+
+            // Timeout máximo de 10 minutos
+            if (duration > 600) {
+              console.log('⏰ Timeout - parando gravação');
+              clearInterval(checkInterval);
+              recorder.stop();
+              stream.getTracks().forEach(track => track.stop());
+            }
+          }, 2000);
+
+        } catch (error) {
+          console.error('❌ Erro na captura:', error);
+          reject(error);
         }
-      }, 2000);
-
-      // Cleanup quando stream terminar
-      const cleanup = () => {
-        clearInterval(silenceCheck);
-        clearInterval(progressInterval);
-        clearTimeout(timeout);
-      };
-
-      stream.on('end', cleanup);
-      stream.on('error', cleanup);
+      });
     });
 
-    // ✅ Aguardar arquivo ser finalizado
-    await new Promise(resolve => {
-      file.on('finish', resolve);
-      file.end();
-    });
+    recordingInfo.progress = 80;
+    recordingInfo.message = 'Processando áudio gravado...';
 
-    recordingInfo.status = 'processing';
-    recordingInfo.message = 'Convertendo para WAV...';
-    recordingInfo.progress = 90;
+    console.log(`📊 Dados de áudio recebidos: ${audioData.length} bytes`);
 
-    console.log(`🔄 Convertendo ${path.basename(tempWebm)} para WAV...`);
+    // ✅ Salvar arquivo
+    const buffer = Buffer.from(audioData);
+    await fs.writeFile(outputFile, buffer);
 
-    // ✅ Converter WebM para WAV usando fluent-ffmpeg
-    await new Promise((resolve, reject) => {
-      ffmpeg(tempWebm)
-        .noVideo()
-        .audioCodec('pcm_s16le')
-        .audioChannels(2)
-        .audioFrequency(44100)
-        .on('start', (commandLine) => {
-          console.log('🎛️ FFmpeg iniciado:', commandLine);
-        })
-        .on('progress', (progress) => {
-          if (progress.percent) {
-            const totalProgress = 90 + (progress.percent * 0.1);
-            recordingInfo.progress = Math.round(totalProgress);
-            console.log(`🔄 Conversão: ${Math.round(progress.percent)}%`);
-          }
-        })
-        .on('end', () => {
-          console.log('✅ Conversão para WAV concluída');
-          resolve();
-        })
-        .on('error', (err) => {
-          console.error('❌ Erro na conversão:', err);
-          reject(err);
-        })
-        .save(outputFile);
-    });
-
-    // ✅ Verificar arquivo final
     const stats = await fs.stat(outputFile);
+    
     if (stats.size === 0) {
-      throw new Error('Arquivo WAV está vazio');
+      throw new Error('Arquivo de gravação está vazio');
     }
 
     recordingInfo.status = 'completed';
@@ -365,17 +314,9 @@ async function captureAudioStream(youtubeUrl, recordingInfo) {
     recordingInfo.progress = 100;
     recordingInfo.outputFile = outputFile;
     recordingInfo.fileSize = Math.round(stats.size / 1024);
-    recordingInfo.videoDuration = capturedDuration;
+    recordingInfo.videoDuration = Math.round(stats.size / 16000); // Estimativa baseada no tamanho
 
-    console.log(`✅ Gravação concluída: ${path.basename(outputFile)} (${recordingInfo.fileSize}KB, ${capturedDuration}s)`);
-
-    // ✅ Limpar arquivo temporário
-    try {
-      await fs.unlink(tempWebm);
-      console.log(`🧹 Arquivo temporário removido: ${path.basename(tempWebm)}`);
-    } catch (e) {
-      console.log('⚠️ Erro ao remover arquivo temporário:', e.message);
-    }
+    console.log(`✅ Gravação concluída: ${path.basename(outputFile)} (${recordingInfo.fileSize}KB)`);
 
     return outputFile;
 
@@ -384,11 +325,10 @@ async function captureAudioStream(youtubeUrl, recordingInfo) {
     recordingInfo.message = `Erro na gravação: ${error.message}`;
     recordingInfo.error = error.message;
     
-    console.error('❌ Erro na captura de áudio:', error);
+    console.error('❌ Erro na gravação:', error);
     throw error;
 
   } finally {
-    // ✅ Cleanup
     if (page) {
       try {
         await page.close();
@@ -404,46 +344,6 @@ async function captureAudioStream(youtubeUrl, recordingInfo) {
         console.log('Erro ao fechar browser:', e.message);
       }
     }
-    
-    // Limpar arquivo temporário se ainda existir
-    try {
-      await fs.unlink(tempWebm);
-    } catch (e) {
-      // Ignorar se já foi removido
-    }
-  }
-}
-
-// ======================================================
-// FALLBACK: Método tradicional
-// ======================================================
-
-async function recordWithScreenCapture(youtubeUrl, recordingInfo) {
-  const outputFile = path.join(DOWNLOADS_DIR, generateUniqueFilename());
-  
-  try {
-    recordingInfo.status = 'screen_capture';
-    recordingInfo.message = 'Iniciando captura de tela + áudio...';
-
-    const ffmpegCommand = `ffmpeg -f x11grab -video_size 1280x720 -framerate 1 -i :99 -f pulse -i default -map 1:a -f wav -acodec pcm_s16le -ar 44100 -ac 2 -t 300 "${outputFile}"`;
-    
-    recordingInfo.message = 'Gravando via captura de tela...';
-    
-    await execAsync(ffmpegCommand, { timeout: 320000 });
-    
-    const stats = await fs.stat(outputFile);
-    if (stats.size > 0) {
-      recordingInfo.status = 'completed';
-      recordingInfo.outputFile = outputFile;
-      recordingInfo.fileSize = Math.round(stats.size / 1024);
-      return outputFile;
-    }
-    
-    throw new Error('Captura de tela não gerou arquivo');
-    
-  } catch (error) {
-    console.error('❌ Erro na captura de tela:', error);
-    throw error;
   }
 }
 
@@ -490,18 +390,14 @@ app.post('/record-beat', async (req, res) => {
 
   activeRecordings.set(recordingId, recordingInfo);
 
-  // ✅ Processar com novo método de stream
+  // ✅ Processar com Puppeteer puro
   (async () => {
     try {
-      await captureAudioStream(youtubeUrl, recordingInfo);
+      await recordAudioDirect(youtubeUrl, recordingInfo);
     } catch (error) {
-      try {
-        console.log('🔄 Tentando método de fallback...');
-        await recordWithScreenCapture(youtubeUrl, recordingInfo);
-      } catch (fallbackError) {
-        recordingInfo.status = 'error';
-        recordingInfo.error = `Ambos métodos falharam: ${error.message} | ${fallbackError.message}`;
-      }
+      recordingInfo.status = 'error';
+      recordingInfo.error = `Gravação falhou: ${error.message}`;
+      console.error('❌ Erro na gravação:', error);
     }
   })();
 
@@ -556,13 +452,13 @@ app.get('/download/:recordingId', async (req, res) => {
     const filePath = recording.outputFile;
     await fs.access(filePath);
     
-    const filename = `${recording.videoTitle || 'beat'}_complete.wav`
+    const filename = `${recording.videoTitle || 'beat'}_complete.webm`
       .replace(/[^\w\s-]/g, '')
       .trim()
       .substring(0, 100);
     
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Content-Type', 'audio/webm');
     
     res.sendFile(path.resolve(filePath), (err) => {
       if (err) {
@@ -594,7 +490,7 @@ app.get('/test', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
 <head>
-    <title>🎵 Beat Inteiro - Stream Capture</title>
+    <title>🎵 Beat Inteiro - Puppeteer PURO</title>
     <meta charset="UTF-8">
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; background: #1a1a1a; color: white; }
@@ -609,21 +505,21 @@ app.get('/test', (req, res) => {
         .progress-bar { height: 100%; background: linear-gradient(90deg, #ff6b6b, #4ecdc4); transition: width 0.3s; }
         .download { background: #4ecdc4; }
         .error { background: #ff4757; }
-        .feature { background: #2a2a2a; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 3px solid #4ecdc4; }
+        .feature { background: #2a2a2a; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 3px solid #ff6b6b; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🎵 Beat Inteiro</h1>
-        <div class="subtitle">🔥 Agora com Puppeteer-Stream - Captura direta de áudio!</div>
+        <div class="subtitle">🔥 PUPPETEER PURO - Foda-se FFmpeg!</div>
         
         <div class="feature">
-            <strong>✨ Nova tecnologia:</strong> Captura o áudio diretamente do stream da página, sem depender de elementos de vídeo específicos!
+            <strong>🎤 Gravação direta:</strong> Usa MediaRecorder API do browser para capturar áudio em tempo real, sem depender de FFmpeg ou seletores!
         </div>
         
         <input type="text" id="youtubeUrl" placeholder="Cole o link do YouTube aqui..." 
                value="https://www.youtube.com/watch?v=ysFIwSGdR48">
-        <button onclick="startRecording()">🎤 Gravar Beat Completo (Stream Capture)</button>
+        <button onclick="startRecording()">🎤 Gravar Beat (Puppeteer Puro)</button>
         
         <div id="result"></div>
     </div>
@@ -682,9 +578,9 @@ app.get('/test', (req, res) => {
         
         function showStatus(message, progress, status, data) {
             const info = data ? 
-                '<p><strong>Vídeo:</strong> ' + (data.videoTitle || 'Carregando...') + '</p>' +
-                '<p><strong>Autor:</strong> ' + (data.videoAuthor || 'Carregando...') + '</p>' +
-                '<p><strong>Duração:</strong> ' + (data.videoDuration ? Math.round(data.videoDuration) + 's' : 'Capturando...') + '</p>'
+                '<p><strong>Vídeo:</strong> ' + (data.videoTitle || 'Detectando...') + '</p>' +
+                '<p><strong>Autor:</strong> ' + (data.videoAuthor || 'Detectando...') + '</p>' +
+                '<p><strong>Tamanho:</strong> ' + (data.fileSize ? data.fileSize + 'KB' : 'Gravando...') + '</p>'
                 : '';
             
             document.getElementById('result').innerHTML = 
@@ -704,11 +600,11 @@ app.get('/test', (req, res) => {
                     '<h3>✅ Beat Gravado com Sucesso!</h3>' +
                     '<p><strong>Vídeo:</strong> ' + data.videoTitle + '</p>' +
                     '<p><strong>Autor:</strong> ' + data.videoAuthor + '</p>' +
-                    '<p><strong>Duração:</strong> ' + Math.round(data.videoDuration) + 's</p>' +
                     '<p><strong>Tamanho:</strong> ' + data.fileSize + 'KB</p>' +
+                    '<p><strong>Formato:</strong> WebM (áudio puro)</p>' +
                     '<br>' +
                     '<a href="' + data.downloadUrl + '" download>' +
-                        '<button>📥 Baixar Beat Completo (WAV)</button>' +
+                        '<button>📥 Baixar Beat Completo (WebM)</button>' +
                     '</a>' +
                 '</div>';
         }
@@ -730,13 +626,13 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     activeRecordings: activeRecordings.size,
     maxConcurrent: MAX_CONCURRENT,
-    method: 'puppeteer_stream_capture',
+    method: 'puppeteer_pure_mediarecorder',
     features: [
-      'Captura direta de áudio via Puppeteer-Stream',
-      'Não depende de seletores de vídeo',
-      'Conversão automática WebM → WAV',
-      'Detecção automática do fim do vídeo',
-      'Qualidade máxima (44.1kHz estéreo)'
+      'Gravação direta com MediaRecorder API',
+      'Puppeteer puro - sem FFmpeg',
+      'Captura de áudio em tempo real',
+      'Detecção automática do fim do áudio',
+      'Formato WebM nativo'
     ]
   });
 });
@@ -771,10 +667,10 @@ async function startServer() {
   
   app.listen(PORT, () => {
     console.log(`🚀 Servidor Beat Inteiro rodando na porta ${PORT}`);
-    console.log(`🎤 Método: Puppeteer-Stream (captura direta de áudio)`);
+    console.log(`🎤 Método: PUPPETEER PURO (foda-se FFmpeg!)`);
     console.log(`⚡ Máximo de gravações simultâneas: ${MAX_CONCURRENT}`);
     console.log(`🌐 Teste em: http://localhost:${PORT}/test`);
-    console.log(`💡 Funcionalidade: Captura DIRETA do stream de áudio!`);
+    console.log(`💡 Funcionalidade: MediaRecorder API direto no browser!`);
   });
 }
 

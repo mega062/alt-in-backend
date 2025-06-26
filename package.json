@@ -1,7 +1,7 @@
 {
-  "name": "beat-inteiro-backend",
+  "name": "beat-inteiro-puppeteer-puro",
   "version": "1.0.0",
-  "description": "Gravação completa de beats do YouTube",
+  "description": "Gravação de beats com Puppeteer puro - foda-se FFmpeg",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,11 +9,7 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "puppeteer": "^21.11.0",
-    "puppeteer-stream": "^3.0.20"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
+    "puppeteer": "^21.6.1"
   },
   "engines": {
     "node": ">=18.0.0"
