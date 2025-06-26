@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "puppeteer": "^21.6.1"
+    "puppeteer": "^21.11.0",
+    "puppeteer-stream": "^3.0.20"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
