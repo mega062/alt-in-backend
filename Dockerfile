@@ -1,38 +1,29 @@
-# Dockerfile mínimo e funcional
-FROM node:18
+# Dockerfile ultra leve - sem Chrome, com fallback
+FROM node:18-alpine
 
-# Instalar Chrome
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    ca-certificates
-
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list
-
-RUN apt-get update && apt-get install -y \
-    google-chrome-stable \
-    libxss1 \
-    libasound2 \
-    libgtk-3-0 \
-    libnss3 \
-    libgbm1 \
-    --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+# Instalar apenas dependências mínimas
+RUN apk add --no-cache \
+    chromium \
+    nss \
+    freetype \
+    freetype-dev \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont
 
 WORKDIR /app
 
-# Instalar dependências com versões corretas
-RUN npm install express@4.18.2 puppeteer@24.10.2 puppeteer-stream@3.0.20
+# Instalar apenas dependências básicas
+RUN npm install express@4.18.2 puppeteer@24.10.2
 
-# Copiar apenas o server.js
+# Copiar apenas o server
 COPY server.js ./
 
-# Criar diretório de downloads
+# Criar diretório
 RUN mkdir -p downloads
 
-# Variáveis de ambiente
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome
+# Variáveis
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 ENV NODE_ENV=production
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
