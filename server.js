@@ -73,12 +73,12 @@ async function ensureDownloadsDir() {
 }
 
 // ======================================================
-// CORE: GRAVAÇÃO COM BROWSER + FFMPEG
+// CORE: GRAVAÇÃO COM BROWSER + FFMPEG (CORRIGIDO)
 // ======================================================
 
 async function recordBeatCompleto(youtubeUrl, recordingInfo) {
   const browser = await puppeteer.launch({
-    headless: true,
+    headless: "new", // ✅ Corrige warning de headless
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -87,7 +87,16 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
       '--disable-web-security',
       '--allow-running-insecure-content',
       '--autoplay-policy=no-user-gesture-required',
-      '--disable-features=VizDisplayCompositor'
+      '--disable-features=VizDisplayCompositor',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-infobars',
+      '--disable-translate',
+      '--disable-extensions',
+      '--mute-audio', // ✅ Evita conflitos de áudio
+      '--no-first-run',
+      '--no-default-browser-check'
     ]
   });
 
@@ -101,16 +110,19 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
 
     page = await browser.newPage();
     
-    // Configurar página para áudio
+    // ✅ Configurações melhoradas
     await page.setViewport({ width: 1280, height: 720 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
-    // Bloquear anúncios e outros elementos desnecessários
+    // ✅ Interceptação melhorada
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
+      const url = req.url();
+      
       if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font') {
         req.abort();
-      } else if (req.url().includes('googlesyndication') || req.url().includes('googletagservices')) {
+      } else if (url.includes('googlesyndication') || url.includes('googletagservices') || url.includes('doubleclick')) {
         req.abort();
       } else {
         req.continue();
@@ -120,63 +132,167 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     recordingInfo.status = 'loading_video';
     recordingInfo.message = 'Carregando vídeo...';
 
-    // Navegar para o YouTube
-    await page.goto(youtubeUrl, { 
-      waitUntil: 'networkidle0',
+    // ✅ Limpar URL e navegar
+    const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
+    console.log(`🎵 URL limpa: ${cleanUrl}`);
+
+    await page.goto(cleanUrl, { 
+      waitUntil: 'domcontentloaded', // ✅ Menos restritivo
       timeout: 60000 
     });
 
-    // Aguardar player carregar
-    await page.waitForSelector('video', { timeout: 30000 });
+    // ✅ Aguardar página carregar completamente
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // ✅ Múltiplos seletores para encontrar vídeo
+    const videoSelectors = [
+      'video',
+      '#movie_player video',
+      '.html5-video-player video',
+      'video.video-stream',
+      '[data-layer="4"] video'
+    ];
+
+    let videoElement = null;
+    for (const selector of videoSelectors) {
+      try {
+        console.log(`🔍 Tentando seletor: ${selector}`);
+        await page.waitForSelector(selector, { timeout: 10000 });
+        videoElement = selector;
+        console.log(`✅ Vídeo encontrado com: ${selector}`);
+        break;
+      } catch (e) {
+        console.log(`❌ Seletor ${selector} falhou`);
+        continue;
+      }
+    }
+
+    if (!videoElement) {
+      throw new Error('Player de vídeo não encontrado em nenhum seletor');
+    }
 
     recordingInfo.status = 'preparing_recording';
     recordingInfo.message = 'Preparando gravação...';
 
-    // Obter informações do vídeo
-    const videoInfo = await page.evaluate(() => {
-      const video = document.querySelector('video');
-      const title = document.querySelector('h1.title yt-formatted-string, #title h1, [id="title"] h1')?.innerText || 'Unknown';
-      const author = document.querySelector('#channel-name a, #owner-text .yt-simple-endpoint')?.innerText || 'Unknown';
+    // ✅ Obter informações do vídeo com fallbacks
+    const videoInfo = await page.evaluate((videoSelector) => {
+      const video = document.querySelector(videoSelector);
+      
+      // Múltiplos seletores para título
+      const titleSelectors = [
+        'h1.title yt-formatted-string',
+        '#title h1',
+        '[id="title"] h1',
+        '.ytd-video-primary-info-renderer h1',
+        'h1.ytd-watch-metadata'
+      ];
+      
+      let title = 'Unknown';
+      for (const titleSel of titleSelectors) {
+        const titleEl = document.querySelector(titleSel);
+        if (titleEl && titleEl.innerText.trim()) {
+          title = titleEl.innerText.trim();
+          break;
+        }
+      }
+
+      // Múltiplos seletores para autor
+      const authorSelectors = [
+        '#channel-name a',
+        '#owner-text .yt-simple-endpoint',
+        '.ytd-channel-name a',
+        '#upload-info #channel-name a'
+      ];
+      
+      let author = 'Unknown';
+      for (const authorSel of authorSelectors) {
+        const authorEl = document.querySelector(authorSel);
+        if (authorEl && authorEl.innerText.trim()) {
+          author = authorEl.innerText.trim();
+          break;
+        }
+      }
       
       return {
-        title: title.trim(),
-        author: author.trim(),
-        duration: video ? video.duration || 0 : 0,
+        title: title,
+        author: author,
+        duration: video ? (video.duration || 300) : 300,
         currentTime: video ? video.currentTime : 0
       };
-    });
+    }, videoElement);
 
     recordingInfo.videoTitle = videoInfo.title;
     recordingInfo.videoAuthor = videoInfo.author;
     recordingInfo.videoDuration = videoInfo.duration;
 
-    console.log(`🎵 Iniciando gravação: ${videoInfo.title} (${Math.round(videoInfo.duration)}s)`);
+    console.log(`🎵 Informações obtidas: ${videoInfo.title} por ${videoInfo.author} (${Math.round(videoInfo.duration)}s)`);
 
-    // Preparar FFmpeg para captura de áudio via PulseAudio/ALSA
-    const ffmpegCommand = `ffmpeg -f pulse -i default -f wav -acodec pcm_s16le -ar 44100 -ac 2 -t ${Math.ceil(videoInfo.duration) + 5} "${outputFile}"`;
+    // ✅ FFmpeg com configuração melhorada
+    const recordingDuration = Math.ceil(videoInfo.duration) + 10; // +10s de buffer
+    
+    // Diferentes abordagens de captura de áudio
+    const audioCommands = [
+      // Comando 1: Pulse audio
+      `ffmpeg -f pulse -i default -f wav -acodec pcm_s16le -ar 44100 -ac 2 -t ${recordingDuration} "${outputFile}"`,
+      // Comando 2: ALSA
+      `ffmpeg -f alsa -i default -f wav -acodec pcm_s16le -ar 44100 -ac 2 -t ${recordingDuration} "${outputFile}"`,
+      // Comando 3: Captura do sistema
+      `ffmpeg -f alsa -i hw:0 -f wav -acodec pcm_s16le -ar 44100 -ac 2 -t ${recordingDuration} "${outputFile}"`
+    ];
     
     recordingInfo.status = 'recording';
     recordingInfo.message = `Gravando beat completo... (${Math.round(videoInfo.duration)}s)`;
     recordingInfo.progress = 0;
 
-    // Iniciar gravação FFmpeg em background
-    ffmpegProcess = exec(ffmpegCommand);
-    
-    // Aguardar um pouco para FFmpeg inicializar
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    let ffmpegStarted = false;
+    for (let i = 0; i < audioCommands.length; i++) {
+      try {
+        console.log(`🎤 Tentativa FFmpeg ${i + 1}: ${audioCommands[i].split(' ').slice(0, 6).join(' ')}...`);
+        
+        ffmpegProcess = exec(audioCommands[i]);
+        
+        // Aguardar FFmpeg inicializar
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // Verificar se processo ainda está rodando
+        if (!ffmpegProcess.killed) {
+          ffmpegStarted = true;
+          console.log(`✅ FFmpeg iniciado com comando ${i + 1}`);
+          break;
+        }
+      } catch (error) {
+        console.log(`❌ Comando FFmpeg ${i + 1} falhou: ${error.message}`);
+        continue;
+      }
+    }
 
-    // Iniciar reprodução do vídeo
-    await page.evaluate(() => {
-      const video = document.querySelector('video');
+    if (!ffmpegStarted) {
+      throw new Error('Nenhum comando FFmpeg funcionou');
+    }
+
+    // ✅ Iniciar reprodução do vídeo
+    await page.evaluate((videoSelector) => {
+      const video = document.querySelector(videoSelector);
       if (video) {
         video.currentTime = 0;
-        video.play();
+        video.muted = false; // ✅ Garantir que não está mudo
+        video.volume = 1.0;
+        
+        // Tentar dar play
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+          playPromise.catch(error => {
+            console.log('Erro no play:', error);
+          });
+        }
       }
-    });
+    }, videoElement);
 
-    // Monitorar progresso da gravação
+    console.log(`🔴 Gravação iniciada para ${Math.round(videoInfo.duration)}s`);
+
+    // ✅ Monitoramento melhorado
     const startTime = Date.now();
-    const totalDuration = (videoInfo.duration + 5) * 1000; // +5s de buffer
+    const totalDuration = (videoInfo.duration + 10) * 1000;
 
     const progressInterval = setInterval(async () => {
       try {
@@ -184,22 +300,26 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
         const progress = Math.min((elapsed / totalDuration) * 100, 100);
         
         recordingInfo.progress = Math.round(progress);
-        recordingInfo.message = `Gravando... ${Math.round(progress)}%`;
+        recordingInfo.message = `Gravando... ${Math.round(progress)}% (${Math.round(elapsed/1000)}s)`;
 
-        // Verificar se o vídeo ainda está tocando
-        const isPlaying = await page.evaluate(() => {
-          const video = document.querySelector('video');
-          return video && !video.paused;
-        });
+        // ✅ Verificar se vídeo ainda está tocando
+        const videoStatus = await page.evaluate((videoSelector) => {
+          const video = document.querySelector(videoSelector);
+          return {
+            paused: video ? video.paused : true,
+            currentTime: video ? video.currentTime : 0,
+            ended: video ? video.ended : false
+          };
+        }, videoElement);
 
-        if (!isPlaying && progress < 90) {
-          // Tentar retomar reprodução se pausou
-          await page.evaluate(() => {
-            const video = document.querySelector('video');
+        if (videoStatus.paused && !videoStatus.ended && progress < 90) {
+          console.log('⚠️ Vídeo pausado, tentando retomar...');
+          await page.evaluate((videoSelector) => {
+            const video = document.querySelector(videoSelector);
             if (video && video.paused) {
-              video.play();
+              video.play().catch(e => console.log('Erro ao retomar:', e));
             }
-          });
+          }, videoElement);
         }
 
       } catch (error) {
@@ -207,17 +327,19 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
       }
     }, 2000);
 
-    // Aguardar conclusão da gravação
+    // ✅ Aguardar conclusão com timeout maior
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('Timeout na gravação'));
-      }, totalDuration + 10000);
+      }, totalDuration + 30000); // +30s de buffer
 
       ffmpegProcess.on('close', (code) => {
         clearTimeout(timeout);
         clearInterval(progressInterval);
         
-        if (code === 0) {
+        console.log(`🏁 FFmpeg terminou com código: ${code}`);
+        
+        if (code === 0 || code === null) {
           resolve();
         } else {
           reject(new Error(`FFmpeg falhou com código ${code}`));
@@ -235,7 +357,7 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     recordingInfo.message = 'Processando áudio...';
     recordingInfo.progress = 95;
 
-    // Verificar se arquivo foi criado
+    // ✅ Verificar arquivo gerado
     const stats = await fs.stat(outputFile);
     if (stats.size === 0) {
       throw new Error('Arquivo de gravação está vazio');
@@ -245,7 +367,7 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     recordingInfo.message = 'Beat gravado com sucesso!';
     recordingInfo.progress = 100;
     recordingInfo.outputFile = outputFile;
-    recordingInfo.fileSize = Math.round(stats.size / 1024); // KB
+    recordingInfo.fileSize = Math.round(stats.size / 1024);
 
     console.log(`✅ Gravação concluída: ${path.basename(outputFile)} (${recordingInfo.fileSize}KB)`);
 
@@ -260,23 +382,34 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     throw error;
 
   } finally {
-    // Cleanup
-    if (ffmpegProcess) {
+    // ✅ Cleanup melhorado
+    if (ffmpegProcess && !ffmpegProcess.killed) {
       try {
-        ffmpegProcess.kill();
-      } catch (e) {}
+        ffmpegProcess.kill('SIGTERM');
+        setTimeout(() => {
+          if (!ffmpegProcess.killed) {
+            ffmpegProcess.kill('SIGKILL');
+          }
+        }, 5000);
+      } catch (e) {
+        console.log('Erro ao finalizar FFmpeg:', e.message);
+      }
     }
     
     if (page) {
       try {
         await page.close();
-      } catch (e) {}
+      } catch (e) {
+        console.log('Erro ao fechar página:', e.message);
+      }
     }
     
     if (browser) {
       try {
         await browser.close();
-      } catch (e) {}
+      } catch (e) {
+        console.log('Erro ao fechar browser:', e.message);
+      }
     }
   }
 }
@@ -655,3 +788,4 @@ async function startServer() {
 }
 
 startServer();
+    console.log(`
