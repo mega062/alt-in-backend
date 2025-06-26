@@ -465,7 +465,7 @@ async function startServer() {
   }
 }
 
-startServer(); ao fechar página:', e.message);
+startServer();
       }
     }
     
