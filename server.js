@@ -8,13 +8,13 @@ const crypto = require('crypto');
 // Configuração para ambiente de produção
 const isProd = process.env.NODE_ENV === 'production';
 
+// Configuração do Puppeteer baseada no ambiente
 let launch, getStream;
 
-// Configuração do Puppeteer baseada no ambiente
 if (isProd) {
   // Em produção, usar puppeteer com configuração otimizada para serverless
   const puppeteer = require('puppeteer');
-  const { getStream } = require('puppeteer-stream');
+  const { getStream: puppeteerGetStream } = require('puppeteer-stream');
   
   launch = async (options = {}) => {
     return await puppeteer.launch({
@@ -66,8 +66,8 @@ if (isProd) {
     });
   };
   
-  // Usar getStream diretamente
-  getStream = getStream;
+  // Atribuir corretamente
+  getStream = puppeteerGetStream;
 } else {
   // Em desenvolvimento, usar configuração padrão
   const { launch: puppeteerLaunch, getStream: puppeteerGetStream } = require('puppeteer-stream');
