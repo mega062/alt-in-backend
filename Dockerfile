@@ -78,5 +78,5 @@ ENV DISPLAY=:99
 # Expor porta
 EXPOSE 10000
 
-# Comando de inicialização
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset & node server.js"]
+# Comando de inicialização com limpeza do X server
+CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset & sleep 2 && node server.js"]
