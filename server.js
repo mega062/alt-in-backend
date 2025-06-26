@@ -14,12 +14,11 @@ const execAsync = promisify(exec);
 // CONFIGURAÇÕES
 // ======================================================
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
-const MAX_CONCURRENT = 3; // Menos concorrência por causa do browser
-const CLEANUP_INTERVAL = 10 * 60 * 1000; // 10 minutos
+const MAX_CONCURRENT = 3;
+const CLEANUP_INTERVAL = 10 * 60 * 1000;
 
 // Estado global
 const activeRecordings = new Map();
-let recordingId = 0;
 
 // ======================================================
 // CORS E MIDDLEWARE
@@ -42,28 +41,24 @@ app.use(express.json());
 // FUNÇÕES PRINCIPAIS
 // ======================================================
 
-// Extrair ID do vídeo
 function extractVideoId(url) {
   const regex = /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/;
   const match = url.match(regex);
   return match ? match[1] : null;
 }
 
-// Validar URL
 function validateYouTubeUrl(url) {
   if (!url || typeof url !== 'string') return false;
   const regex = /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
   return regex.test(url);
 }
 
-// Gerar nome único
 function generateUniqueFilename(extension = 'wav') {
   const timestamp = Date.now();
   const random = crypto.randomBytes(4).toString('hex');
   return `beat_${timestamp}_${random}.${extension}`;
 }
 
-// Criar diretório se não existir
 async function ensureDownloadsDir() {
   try {
     await fs.access(DOWNLOADS_DIR);
@@ -73,12 +68,12 @@ async function ensureDownloadsDir() {
 }
 
 // ======================================================
-// CORE: GRAVAÇÃO COM BROWSER + FFMPEG (CORRIGIDO)
+// CORE: GRAVAÇÃO COM BROWSER + FFMPEG
 // ======================================================
 
 async function recordBeatCompleto(youtubeUrl, recordingInfo) {
   const browser = await puppeteer.launch({
-    headless: "new", // ✅ Corrige warning de headless
+    headless: "new",
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -94,7 +89,7 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
       '--disable-infobars',
       '--disable-translate',
       '--disable-extensions',
-      '--mute-audio', // ✅ Evita conflitos de áudio
+      '--mute-audio',
       '--no-first-run',
       '--no-default-browser-check'
     ]
@@ -110,11 +105,9 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
 
     page = await browser.newPage();
     
-    // ✅ Configurações melhoradas
     await page.setViewport({ width: 1280, height: 720 });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
-    // ✅ Interceptação melhorada
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
@@ -132,19 +125,16 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     recordingInfo.status = 'loading_video';
     recordingInfo.message = 'Carregando vídeo...';
 
-    // ✅ Limpar URL e navegar
     const cleanUrl = youtubeUrl.split('&list=')[0].split('&start_radio=')[0];
     console.log(`🎵 URL limpa: ${cleanUrl}`);
 
     await page.goto(cleanUrl, { 
-      waitUntil: 'domcontentloaded', // ✅ Menos restritivo
+      waitUntil: 'domcontentloaded',
       timeout: 60000 
     });
 
-    // ✅ Aguardar página carregar completamente
     await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // ✅ Múltiplos seletores para encontrar vídeo
     const videoSelectors = [
       'video',
       '#movie_player video',
@@ -174,11 +164,9 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     recordingInfo.status = 'preparing_recording';
     recordingInfo.message = 'Preparando gravação...';
 
-    // ✅ Obter informações do vídeo com fallbacks
     const videoInfo = await page.evaluate((videoSelector) => {
       const video = document.querySelector(videoSelector);
       
-      // Múltiplos seletores para título
       const titleSelectors = [
         'h1.title yt-formatted-string',
         '#title h1',
@@ -196,7 +184,6 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
         }
       }
 
-      // Múltiplos seletores para autor
       const authorSelectors = [
         '#channel-name a',
         '#owner-text .yt-simple-endpoint',
@@ -227,16 +214,11 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
 
     console.log(`🎵 Informações obtidas: ${videoInfo.title} por ${videoInfo.author} (${Math.round(videoInfo.duration)}s)`);
 
-    // ✅ FFmpeg com configuração melhorada
-    const recordingDuration = Math.ceil(videoInfo.duration) + 10; // +10s de buffer
+    const recordingDuration = Math.ceil(videoInfo.duration) + 10;
     
-    // Diferentes abordagens de captura de áudio
     const audioCommands = [
-      // Comando 1: Pulse audio
       `ffmpeg -f pulse -i default -f wav -acodec pcm_s16le -ar 44100 -ac 2 -t ${recordingDuration} "${outputFile}"`,
-      // Comando 2: ALSA
       `ffmpeg -f alsa -i default -f wav -acodec pcm_s16le -ar 44100 -ac 2 -t ${recordingDuration} "${outputFile}"`,
-      // Comando 3: Captura do sistema
       `ffmpeg -f alsa -i hw:0 -f wav -acodec pcm_s16le -ar 44100 -ac 2 -t ${recordingDuration} "${outputFile}"`
     ];
     
@@ -251,10 +233,8 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
         
         ffmpegProcess = exec(audioCommands[i]);
         
-        // Aguardar FFmpeg inicializar
         await new Promise(resolve => setTimeout(resolve, 3000));
         
-        // Verificar se processo ainda está rodando
         if (!ffmpegProcess.killed) {
           ffmpegStarted = true;
           console.log(`✅ FFmpeg iniciado com comando ${i + 1}`);
@@ -270,15 +250,13 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
       throw new Error('Nenhum comando FFmpeg funcionou');
     }
 
-    // ✅ Iniciar reprodução do vídeo
     await page.evaluate((videoSelector) => {
       const video = document.querySelector(videoSelector);
       if (video) {
         video.currentTime = 0;
-        video.muted = false; // ✅ Garantir que não está mudo
+        video.muted = false;
         video.volume = 1.0;
         
-        // Tentar dar play
         const playPromise = video.play();
         if (playPromise !== undefined) {
           playPromise.catch(error => {
@@ -290,7 +268,6 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
 
     console.log(`🔴 Gravação iniciada para ${Math.round(videoInfo.duration)}s`);
 
-    // ✅ Monitoramento melhorado
     const startTime = Date.now();
     const totalDuration = (videoInfo.duration + 10) * 1000;
 
@@ -302,7 +279,6 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
         recordingInfo.progress = Math.round(progress);
         recordingInfo.message = `Gravando... ${Math.round(progress)}% (${Math.round(elapsed/1000)}s)`;
 
-        // ✅ Verificar se vídeo ainda está tocando
         const videoStatus = await page.evaluate((videoSelector) => {
           const video = document.querySelector(videoSelector);
           return {
@@ -327,11 +303,10 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
       }
     }, 2000);
 
-    // ✅ Aguardar conclusão com timeout maior
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('Timeout na gravação'));
-      }, totalDuration + 30000); // +30s de buffer
+      }, totalDuration + 30000);
 
       ffmpegProcess.on('close', (code) => {
         clearTimeout(timeout);
@@ -357,7 +332,6 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     recordingInfo.message = 'Processando áudio...';
     recordingInfo.progress = 95;
 
-    // ✅ Verificar arquivo gerado
     const stats = await fs.stat(outputFile);
     if (stats.size === 0) {
       throw new Error('Arquivo de gravação está vazio');
@@ -382,7 +356,6 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     throw error;
 
   } finally {
-    // ✅ Cleanup melhorado
     if (ffmpegProcess && !ffmpegProcess.killed) {
       try {
         ffmpegProcess.kill('SIGTERM');
@@ -414,10 +387,6 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
   }
 }
 
-// ======================================================
-// FALLBACK: Gravação usando captura de tela + áudio
-// ======================================================
-
 async function recordWithScreenCapture(youtubeUrl, recordingInfo) {
   const outputFile = path.join(DOWNLOADS_DIR, generateUniqueFilename());
   
@@ -425,12 +394,11 @@ async function recordWithScreenCapture(youtubeUrl, recordingInfo) {
     recordingInfo.status = 'screen_capture';
     recordingInfo.message = 'Iniciando captura de tela + áudio...';
 
-    // Usar ffmpeg para captura de tela virtual + áudio
     const ffmpegCommand = `ffmpeg -f x11grab -video_size 1280x720 -framerate 1 -i :99 -f pulse -i default -map 1:a -f wav -acodec pcm_s16le -ar 44100 -ac 2 -t 300 "${outputFile}"`;
     
     recordingInfo.message = 'Gravando via captura de tela...';
     
-    await execAsync(ffmpegCommand, { timeout: 320000 }); // 5+ minutos
+    await execAsync(ffmpegCommand, { timeout: 320000 });
     
     const stats = await fs.stat(outputFile);
     if (stats.size > 0) {
@@ -452,7 +420,6 @@ async function recordWithScreenCapture(youtubeUrl, recordingInfo) {
 // ENDPOINTS
 // ======================================================
 
-// Endpoint principal: iniciar gravação
 app.post('/record-beat', async (req, res) => {
   const { youtubeUrl } = req.body;
   
@@ -492,12 +459,10 @@ app.post('/record-beat', async (req, res) => {
 
   activeRecordings.set(recordingId, recordingInfo);
 
-  // Processar em background
   (async () => {
     try {
       await recordBeatCompleto(youtubeUrl, recordingInfo);
     } catch (error) {
-      // Se falhar, tentar método de fallback
       try {
         console.log('🔄 Tentando método de fallback...');
         await recordWithScreenCapture(youtubeUrl, recordingInfo);
@@ -518,7 +483,6 @@ app.post('/record-beat', async (req, res) => {
   });
 });
 
-// Endpoint: verificar status
 app.get('/status/:recordingId', (req, res) => {
   const { recordingId } = req.params;
   const recording = activeRecordings.get(recordingId);
@@ -545,7 +509,6 @@ app.get('/status/:recordingId', (req, res) => {
   });
 });
 
-// Endpoint: download do arquivo
 app.get('/download/:recordingId', async (req, res) => {
   const { recordingId } = req.params;
   const recording = activeRecordings.get(recordingId);
@@ -575,7 +538,6 @@ app.get('/download/:recordingId', async (req, res) => {
       } else {
         console.log(`📥 Download concluído: ${recordingId}`);
         
-        // Agendar limpeza do arquivo
         setTimeout(async () => {
           try {
             await fs.unlink(filePath);
@@ -584,7 +546,7 @@ app.get('/download/:recordingId', async (req, res) => {
           } catch (cleanupError) {
             console.error('Erro na limpeza:', cleanupError);
           }
-        }, 5 * 60 * 1000); // 5 minutos após download
+        }, 5 * 60 * 1000);
       }
     });
     
@@ -596,142 +558,135 @@ app.get('/download/:recordingId', async (req, res) => {
   }
 });
 
-// Endpoint: página de teste
 app.get('/test', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>🎵 Beat Inteiro - Gravação Completa</title>
-        <meta charset="UTF-8">
-        <style>
-            body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; background: #1a1a1a; color: white; }
-            .container { background: #2d2d2d; padding: 30px; border-radius: 15px; }
-            h1 { color: #ff6b6b; text-align: center; }
-            input { width: 100%; padding: 15px; margin: 10px 0; border: none; border-radius: 5px; }
-            button { width: 100%; padding: 15px; background: #ff6b6b; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
-            button:hover { background: #ee5a52; }
-            .status { margin: 20px 0; padding: 15px; background: #333; border-radius: 5px; }
-            .progress { width: 100%; height: 20px; background: #444; border-radius: 10px; overflow: hidden; margin: 10px 0; }
-            .progress-bar { height: 100%; background: linear-gradient(90deg, #ff6b6b, #4ecdc4); transition: width 0.3s; }
-            .download { background: #4ecdc4; }
-            .error { background: #ff4757; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🎵 Beat Inteiro</h1>
-            <p>Gravação completa de beats do YouTube com máxima qualidade</p>
-            
-            <input type="text" id="youtubeUrl" placeholder="Cole o link do YouTube aqui..." 
-                   value="https://www.youtube.com/watch?v=ysFIwSGdR48">
-            <button onclick="startRecording()">🎤 Gravar Beat Completo</button>
-            
-            <div id="result"></div>
-        </div>
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+    <title>🎵 Beat Inteiro - Gravação Completa</title>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; background: #1a1a1a; color: white; }
+        .container { background: #2d2d2d; padding: 30px; border-radius: 15px; }
+        h1 { color: #ff6b6b; text-align: center; }
+        input { width: 100%; padding: 15px; margin: 10px 0; border: none; border-radius: 5px; }
+        button { width: 100%; padding: 15px; background: #ff6b6b; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        button:hover { background: #ee5a52; }
+        .status { margin: 20px 0; padding: 15px; background: #333; border-radius: 5px; }
+        .progress { width: 100%; height: 20px; background: #444; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+        .progress-bar { height: 100%; background: linear-gradient(90deg, #ff6b6b, #4ecdc4); transition: width 0.3s; }
+        .download { background: #4ecdc4; }
+        .error { background: #ff4757; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎵 Beat Inteiro</h1>
+        <p>Gravação completa de beats do YouTube com máxima qualidade</p>
+        
+        <input type="text" id="youtubeUrl" placeholder="Cole o link do YouTube aqui..." 
+               value="https://www.youtube.com/watch?v=ysFIwSGdR48">
+        <button onclick="startRecording()">🎤 Gravar Beat Completo</button>
+        
+        <div id="result"></div>
+    </div>
 
-        <script>
-            let checkInterval;
+    <script>
+        let checkInterval;
+        
+        async function startRecording() {
+            const url = document.getElementById('youtubeUrl').value;
+            if (!url) return alert('Cole um link do YouTube!');
             
-            async function startRecording() {
-                const url = document.getElementById('youtubeUrl').value;
-                if (!url) return alert('Cole um link do YouTube!');
+            try {
+                const response = await fetch('/record-beat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ youtubeUrl: url })
+                });
                 
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showStatus('🎤 Gravação iniciada!', 0, 'recording');
+                    checkStatus(data.recordingId);
+                } else {
+                    showError(data.message);
+                }
+            } catch (error) {
+                showError('Erro de conexão: ' + error.message);
+            }
+        }
+        
+        async function checkStatus(recordingId) {
+            if (checkInterval) clearInterval(checkInterval);
+            
+            checkInterval = setInterval(async () => {
                 try {
-                    const response = await fetch('/record-beat', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ youtubeUrl: url })
-                    });
-                    
+                    const response = await fetch('/status/' + recordingId);
                     const data = await response.json();
                     
                     if (response.ok) {
-                        showStatus('🎤 Gravação iniciada!', 0, 'recording');
-                        checkStatus(data.recordingId);
-                    } else {
-                        showError(data.message);
+                        if (data.status === 'completed') {
+                            clearInterval(checkInterval);
+                            showDownload(data);
+                        } else if (data.status === 'error') {
+                            clearInterval(checkInterval);
+                            showError(data.error);
+                        } else {
+                            showStatus(data.message, data.progress, data.status, data);
+                        }
                     }
                 } catch (error) {
-                    showError('Erro de conexão: ' + error.message);
+                    console.error('Erro ao verificar status:', error);
                 }
-            }
+            }, 2000);
+        }
+        
+        function showStatus(message, progress, status, data) {
+            const info = data ? 
+                '<p><strong>Vídeo:</strong> ' + (data.videoTitle || 'Carregando...') + '</p>' +
+                '<p><strong>Autor:</strong> ' + (data.videoAuthor || 'Carregando...') + '</p>' +
+                '<p><strong>Duração:</strong> ' + (data.videoDuration ? Math.round(data.videoDuration) + 's' : 'Carregando...') + '</p>'
+                : '';
             
-            async function checkStatus(recordingId) {
-                if (checkInterval) clearInterval(checkInterval);
-                
-                checkInterval = setInterval(async () => {
-                    try {
-                        const response = await fetch(\`/status/\${recordingId}\`);
-                        const data = await response.json();
-                        
-                        if (response.ok) {
-                            if (data.status === 'completed') {
-                                clearInterval(checkInterval);
-                                showDownload(data);
-                            } else if (data.status === 'error') {
-                                clearInterval(checkInterval);
-                                showError(data.error);
-                            } else {
-                                showStatus(data.message, data.progress, data.status, data);
-                            }
-                        }
-                    } catch (error) {
-                        console.error('Erro ao verificar status:', error);
-                    }
-                }, 2000);
-            }
-            
-            function showStatus(message, progress, status, data) {
-                const info = data ? \`
-                    <p><strong>Vídeo:</strong> \${data.videoTitle || 'Carregando...'}</p>
-                    <p><strong>Autor:</strong> \${data.videoAuthor || 'Carregando...'}</p>
-                    <p><strong>Duração:</strong> \${data.videoDuration ? Math.round(data.videoDuration) + 's' : 'Carregando...'}</p>
-                \` : '';
-                
-                document.getElementById('result').innerHTML = \`
-                    <div class="status">
-                        <h3>\${message}</h3>
-                        \${info}
-                        <div class="progress">
-                            <div class="progress-bar" style="width: \${progress}%"></div>
-                        </div>
-                        <p>\${progress}% concluído</p>
-                    </div>
-                \`;
-            }
-            
-            function showDownload(data) {
-                document.getElementById('result').innerHTML = \`
-                    <div class="status download">
-                        <h3>✅ Beat Gravado com Sucesso!</h3>
-                        <p><strong>Vídeo:</strong> \${data.videoTitle}</p>
-                        <p><strong>Autor:</strong> \${data.videoAuthor}</p>
-                        <p><strong>Duração:</strong> \${Math.round(data.videoDuration)}s</p>
-                        <p><strong>Tamanho:</strong> \${data.fileSize}KB</p>
-                        <br>
-                        <a href="\${data.downloadUrl}" download>
-                            <button>📥 Baixar Beat Completo (WAV)</button>
-                        </a>
-                    </div>
-                \`;
-            }
-            
-            function showError(message) {
-                document.getElementById('result').innerHTML = \`
-                    <div class="status error">
-                        <h3>❌ Erro na Gravação</h3>
-                        <p>\${message}</p>
-                    </div>
-                \`;
-            }
-        </script>
-    </body>
-    </html>
-  `);
+            document.getElementById('result').innerHTML = 
+                '<div class="status">' +
+                    '<h3>' + message + '</h3>' +
+                    info +
+                    '<div class="progress">' +
+                        '<div class="progress-bar" style="width: ' + progress + '%"></div>' +
+                    '</div>' +
+                    '<p>' + progress + '% concluído</p>' +
+                '</div>';
+        }
+        
+        function showDownload(data) {
+            document.getElementById('result').innerHTML = 
+                '<div class="status download">' +
+                    '<h3>✅ Beat Gravado com Sucesso!</h3>' +
+                    '<p><strong>Vídeo:</strong> ' + data.videoTitle + '</p>' +
+                    '<p><strong>Autor:</strong> ' + data.videoAuthor + '</p>' +
+                    '<p><strong>Duração:</strong> ' + Math.round(data.videoDuration) + 's</p>' +
+                    '<p><strong>Tamanho:</strong> ' + data.fileSize + 'KB</p>' +
+                    '<br>' +
+                    '<a href="' + data.downloadUrl + '" download>' +
+                        '<button>📥 Baixar Beat Completo (WAV)</button>' +
+                    '</a>' +
+                '</div>';
+        }
+        
+        function showError(message) {
+            document.getElementById('result').innerHTML = 
+                '<div class="status error">' +
+                    '<h3>❌ Erro na Gravação</h3>' +
+                    '<p>' + message + '</p>' +
+                '</div>';
+        }
+    </script>
+</body>
+</html>`);
 });
 
-// Endpoint: status do servidor
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
@@ -752,10 +707,9 @@ app.get('/health', (req, res) => {
 // LIMPEZA E INICIALIZAÇÃO
 // ======================================================
 
-// Limpeza periódica
 async function cleanup() {
   const now = Date.now();
-  const maxAge = 30 * 60 * 1000; // 30 minutos
+  const maxAge = 30 * 60 * 1000;
   
   for (const [id, recording] of activeRecordings) {
     const age = now - new Date(recording.startedAt).getTime();
@@ -772,7 +726,6 @@ async function cleanup() {
   }
 }
 
-// Inicializar servidor
 async function startServer() {
   await ensureDownloadsDir();
   
@@ -788,4 +741,3 @@ async function startServer() {
 }
 
 startServer();
-    console.log(`
