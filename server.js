@@ -1,422 +1,529 @@
-// server.js - Versão à prova de falhas para Render
+// server.js - Gravação REAL de áudio do YouTube
 const express = require('express');
 const fs = require('fs');
+const fsPromises = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
+const activeRecordings = new Map();
+const MAX_CONCURRENT = 1; // Apenas 1 gravação simultânea no Render
+const RECORDING_TIMEOUT = 60000; // 1 minuto máximo
 
-// Configuração robusta
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
+// Configuração do Puppeteer
+const isProd = process.env.NODE_ENV === 'production';
+let puppeteer, getStream;
 
-// CORS permissivo
+try {
+  puppeteer = require('puppeteer');
+  const puppeteerStream = require('puppeteer-stream');
+  getStream = puppeteerStream.getStream;
+  console.log('✅ Puppeteer e puppeteer-stream carregados com sucesso');
+} catch (error) {
+  console.error('❌ Erro ao carregar Puppeteer:', error.message);
+  process.exit(1);
+}
+
+app.use(express.json({ limit: '10mb' }));
+
+// CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
-// Sistema de simulação de gravação (sem Puppeteer)
-const activeRecordings = new Map();
-const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
-
-// Garantir que o diretório existe
-try {
-  if (!fs.existsSync(DOWNLOADS_DIR)) {
-    fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
-  }
-} catch (err) {
-  console.error('Erro ao criar diretório:', err);
-}
-
-// Endpoints de health check
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    message: '🎵 Beat Recorder API funcionando!',
-    version: '1.0.0',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    activeRecordings: activeRecordings.size
-  });
-});
-
+// Health check
 app.get('/health', (req, res) => {
   res.json({ 
-    status: 'healthy',
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    timestamp: new Date().toISOString(),
-    activeRecordings: activeRecordings.size
+    status: 'ok',
+    activeRecordings: activeRecordings.size,
+    environment: isProd ? 'production' : 'development',
+    timestamp: new Date().toISOString()
   });
 });
 
-// Endpoint de teste para debug
-app.get('/test', (req, res) => {
+app.get('/', (req, res) => {
   res.json({
-    message: 'Endpoint de teste funcionando!',
-    headers: req.headers,
-    method: req.method,
-    url: req.url,
-    timestamp: new Date().toISOString()
+    message: '🎵 Beat Recorder API - Gravação REAL',
+    status: 'online',
+    activeRecordings: activeRecordings.size
   });
 });
 
 function validateYouTubeUrl(url) {
   if (!url || typeof url !== 'string') return false;
-  const regex = /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
-  return regex.test(url);
-}
-
-function extractVideoId(url) {
-  const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-  return match ? match[1] : 'unknown';
+  return /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/.test(url);
 }
 
 function generateFilename() {
-  const timestamp = Date.now();
-  const random = crypto.randomBytes(4).toString('hex');
-  return `beat_${timestamp}_${random}.mp3`;
+  const stamp = Date.now();
+  const rand = crypto.randomBytes(4).toString('hex');
+  return `beat_${stamp}_${rand}.webm`;
 }
 
-// Simular gravação sem usar Puppeteer
-async function simulateRecording(url, info) {
-  return new Promise((resolve) => {
-    console.log(`🎵 Simulando gravação: ${info.id}`);
-    
-    const videoId = extractVideoId(url);
-    
-    // Simular etapas da gravação
-    const steps = [
-      { status: 'opening_browser', message: 'Conectando ao YouTube...', progress: 10, delay: 1000 },
-      { status: 'loading_video', message: 'Carregando vídeo...', progress: 30, delay: 1500 },
-      { status: 'preparing_recording', message: 'Preparando gravação...', progress: 50, delay: 1000 },
-      { status: 'recording', message: 'Gravando áudio...', progress: 80, delay: 3000 },
-      { status: 'processing', message: 'Processando arquivo...', progress: 95, delay: 1000 }
-    ];
-    
-    let currentStep = 0;
-    
-    function nextStep() {
-      if (currentStep < steps.length) {
-        const step = steps[currentStep];
-        info.status = step.status;
-        info.message = step.message;
-        info.progress = step.progress;
-        
-        console.log(`📝 ${info.id}: ${step.message} (${step.progress}%)`);
-        
-        setTimeout(() => {
-          currentStep++;
-          nextStep();
-        }, step.delay);
-      } else {
-        // Criar arquivo de demonstração
-        createDemoFile(info, videoId).then(() => {
-          resolve();
-        });
-      }
-    }
-    
-    nextStep();
-  });
-}
-
-async function createDemoFile(info, videoId) {
+async function ensureDownloadsDir() {
   try {
-    const filename = generateFilename();
-    const filePath = path.join(DOWNLOADS_DIR, filename);
-    
-    // Criar conteúdo de demonstração
-    const demoContent = `# Beat Recorder - Arquivo de Demonstração
-# 
-# ID da Gravação: ${info.id}
-# Video ID: ${videoId}
-# URL: ${info.url}
-# Timestamp: ${new Date().toISOString()}
-# 
-# Este é um arquivo de demonstração do Beat Recorder.
-# Em um ambiente de produção completo, aqui estaria o áudio
-# gravado diretamente do YouTube.
-# 
-# O sistema está funcionando corretamente!
-# 
-# Para testar o download, este arquivo serve como placeholder.
-# Tamanho do arquivo: ${Math.floor(Math.random() * 5000 + 1000)} bytes simulados
-# Duração simulada: ${Math.floor(Math.random() * 180 + 30)} segundos
-# 
-# Beat Recorder v1.0 - Funcionando! 🎵
-`;
-
-    // Escrever arquivo
-    fs.writeFileSync(filePath, demoContent, 'utf8');
-    
-    // Verificar se foi criado
-    const stats = fs.statSync(filePath);
-    
-    info.file = filePath;
-    info.fileSize = Math.round(stats.size / 1024); // KB
-    info.videoTitle = `YouTube Video - ${videoId}`;
-    info.videoAuthor = 'Demo Channel';
-    info.status = 'completed';
-    info.message = 'Gravação de demonstração concluída!';
-    info.progress = 100;
-    info.downloadUrl = `/download/${info.id}`;
-    
-    console.log(`✅ Demo criado: ${info.id} (${info.fileSize} KB)`);
-    
-  } catch (error) {
-    console.error(`❌ Erro ao criar demo: ${error.message}`);
-    info.status = 'error';
-    info.error = 'Erro ao criar arquivo de demonstração: ' + error.message;
+    await fsPromises.access(DOWNLOADS_DIR);
+  } catch {
+    await fsPromises.mkdir(DOWNLOADS_DIR, { recursive: true });
   }
 }
 
-// Endpoint principal de gravação
+async function getVideoInfo(page) {
+  try {
+    await page.waitForSelector('h1', { timeout: 10000 });
+    
+    const info = await page.evaluate(() => {
+      // Tentar múltiplos seletores para título
+      const titleSelectors = [
+        'h1.ytd-video-primary-info-renderer yt-formatted-string',
+        'h1 yt-formatted-string',
+        'h1[data-title]',
+        'h1',
+        'title'
+      ];
+      
+      let title = 'YouTube Video';
+      for (const selector of titleSelectors) {
+        const element = document.querySelector(selector);
+        if (element && element.textContent) {
+          title = element.textContent.trim();
+          break;
+        }
+      }
+      
+      // Tentar obter autor
+      const authorSelectors = [
+        '#owner-name a',
+        '.ytd-channel-name a',
+        'ytd-video-owner-renderer a'
+      ];
+      
+      let author = 'Unknown';
+      for (const selector of authorSelectors) {
+        const element = document.querySelector(selector);
+        if (element && element.textContent) {
+          author = element.textContent.trim();
+          break;
+        }
+      }
+      
+      return { title, author };
+    });
+    
+    return info;
+  } catch (error) {
+    console.log('⚠️ Erro ao obter info do vídeo:', error.message);
+    return { title: 'YouTube Video', author: 'Unknown' };
+  }
+}
+
+async function realRecording(url, info) {
+  let browser = null;
+  let page = null;
+  let stream = null;
+  let timeoutId = null;
+  
+  try {
+    console.log(`🎬 Iniciando gravação REAL: ${info.id}`);
+    
+    // Timeout de segurança
+    timeoutId = setTimeout(() => {
+      if (info.status !== 'completed' && info.status !== 'error') {
+        console.log(`⏰ Timeout para ${info.id}`);
+        info.status = 'error';
+        info.error = 'Timeout: Gravação demorou mais que 1 minuto';
+      }
+    }, RECORDING_TIMEOUT);
+    
+    info.status = 'opening_browser';
+    info.message = 'Abrindo navegador...';
+    info.progress = 10;
+    
+    // Configuração otimizada para Render
+    const launchOptions = {
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process',
+        '--no-zygote',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--autoplay-policy=no-user-gesture-required',
+        '--enable-features=WebRTC-HideLocalIpsWithMdns',
+        '--disable-audio-output',
+        '--mute-audio=false' // Importante para capturar áudio
+      ],
+      ignoreDefaultArgs: ['--mute-audio'],
+      timeout: 30000
+    };
+    
+    // Usar executável específico se em produção
+    if (isProd && process.env.PUPPETEER_EXECUTABLE_PATH) {
+      launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+    
+    browser = await puppeteer.launch(launchOptions);
+    
+    info.progress = 20;
+    page = await browser.newPage();
+    
+    // Configurar página para áudio
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1280, height: 720 });
+    
+    // Permitir autoplay de áudio
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'mediaDevices', {
+        writable: true,
+        value: {
+          getUserMedia: () => Promise.resolve({
+            getTracks: () => [],
+            getVideoTracks: () => [],
+            getAudioTracks: () => []
+          })
+        }
+      });
+    });
+    
+    info.status = 'loading_video';
+    info.message = 'Carregando vídeo do YouTube...';
+    info.progress = 30;
+    
+    console.log(`📺 Navegando para: ${url}`);
+    await page.goto(url, { 
+      waitUntil: 'networkidle0',
+      timeout: 20000 
+    });
+    
+    info.progress = 40;
+    
+    // Aguardar vídeo carregar
+    await page.waitForSelector('video', { timeout: 15000 });
+    
+    info.progress = 50;
+    
+    // Obter informações do vídeo
+    const videoInfo = await getVideoInfo(page);
+    info.videoTitle = videoInfo.title;
+    info.videoAuthor = videoInfo.author;
+    
+    console.log(`🎵 Vídeo: "${videoInfo.title}" por ${videoInfo.author}`);
+    
+    info.status = 'preparing_recording';
+    info.message = 'Preparando para gravar...';
+    info.progress = 60;
+    
+    // Tentar reproduzir o vídeo
+    await page.evaluate(async () => {
+      const video = document.querySelector('video');
+      if (video) {
+        video.muted = false;
+        video.volume = 1.0;
+        
+        // Tentar clicar no botão play se existir
+        const playButton = document.querySelector('.ytp-large-play-button') || 
+                          document.querySelector('.ytp-play-button');
+        if (playButton) {
+          playButton.click();
+        }
+        
+        try {
+          await video.play();
+        } catch (e) {
+          console.log('Erro ao reproduzir via JS:', e.message);
+        }
+      }
+    });
+    
+    // Aguardar o vídeo começar
+    await page.waitForTimeout(3000);
+    
+    info.status = 'recording';
+    info.message = 'Gravando áudio...';
+    info.progress = 70;
+    
+    const filename = generateFilename();
+    const output = path.join(DOWNLOADS_DIR, filename);
+    
+    console.log(`🔴 Iniciando captura de áudio: ${output}`);
+    
+    // Configurar stream de áudio
+    stream = await getStream(page, { 
+      audio: true, 
+      video: false,
+      mimeType: 'audio/webm;codecs=opus',
+      audioBitsPerSecond: 128000 // 128kbps para boa qualidade
+    });
+    
+    const writeStream = fs.createWriteStream(output);
+    stream.pipe(writeStream);
+    
+    info.progress = 80;
+    
+    // Gravar por 20 segundos
+    await new Promise((resolve, reject) => {
+      const recordingDuration = 20000; // 20 segundos
+      
+      const timer = setTimeout(() => {
+        console.log(`⏹️ Finalizando gravação de ${info.id}`);
+        if (stream && !stream.destroyed) {
+          stream.destroy();
+        }
+        resolve();
+      }, recordingDuration);
+      
+      stream.on('end', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      
+      stream.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      
+      // Atualizar progresso
+      const progressTimer = setInterval(() => {
+        if (info.progress < 90) {
+          info.progress += 2;
+        }
+      }, 1000);
+      
+      stream.on('end', () => clearInterval(progressTimer));
+      stream.on('error', () => clearInterval(progressTimer));
+    });
+    
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    
+    info.status = 'processing';
+    info.message = 'Processando arquivo...';
+    info.progress = 95;
+    
+    // Aguardar escrita do arquivo
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Verificar arquivo
+    try {
+      const stats = await fsPromises.stat(output);
+      info.fileSize = Math.round(stats.size / 1024);
+      
+      if (stats.size < 1000) {
+        throw new Error(`Arquivo muito pequeno (${stats.size} bytes) - possível falha na captura`);
+      }
+      
+      console.log(`✅ Arquivo gravado: ${info.fileSize} KB`);
+    } catch (statError) {
+      throw new Error('Erro ao verificar arquivo: ' + statError.message);
+    }
+    
+    info.status = 'completed';
+    info.message = 'Gravação concluída!';
+    info.progress = 100;
+    info.file = output;
+    info.downloadUrl = `/download/${info.id}`;
+    
+    console.log(`🎉 Gravação REAL concluída: ${info.id} (${info.fileSize} KB)`);
+    
+  } catch (err) {
+    console.error(`❌ Erro na gravação REAL ${info.id}:`, err.message);
+    
+    if (timeoutId) clearTimeout(timeoutId);
+    
+    let errorMessage = err.message;
+    if (err.message.includes('Session closed') || err.message.includes('Target closed')) {
+      errorMessage = 'Navegador foi fechado inesperadamente - tente novamente';
+    } else if (err.message.includes('timeout')) {
+      errorMessage = 'Timeout - vídeo demorou muito para carregar';
+    } else if (err.message.includes('Navigation')) {
+      errorMessage = 'Erro ao acessar YouTube - verifique a URL';
+    }
+    
+    info.status = 'error';
+    info.error = errorMessage;
+    
+  } finally {
+    // Cleanup
+    if (stream && !stream.destroyed) {
+      try {
+        stream.destroy();
+      } catch (e) {
+        console.log('Erro ao destruir stream:', e.message);
+      }
+    }
+    
+    if (page && !page.isClosed()) {
+      try {
+        await page.close();
+      } catch (e) {
+        console.log('Erro ao fechar página:', e.message);
+      }
+    }
+    
+    if (browser && browser.isConnected()) {
+      try {
+        await browser.close();
+        console.log(`🗂️ Browser fechado: ${info.id}`);
+      } catch (e) {
+        console.error('Erro ao fechar browser:', e.message);
+      }
+    }
+  }
+}
+
 app.post('/record', async (req, res) => {
   try {
-    console.log('📥 Nova solicitação de gravação recebida');
-    console.log('Body:', req.body);
-    
     const { url } = req.body;
     
-    // Validações
     if (!url) {
-      console.log('❌ URL não fornecida');
-      return res.status(400).json({ 
-        error: 'URL é obrigatória',
-        received: req.body
-      });
+      return res.status(400).json({ error: 'URL é obrigatória' });
     }
     
     if (!validateYouTubeUrl(url)) {
-      console.log('❌ URL inválida:', url);
-      return res.status(400).json({ 
-        error: 'URL do YouTube inválida',
-        url: url
-      });
+      return res.status(400).json({ error: 'URL do YouTube inválida' });
     }
     
-    // Limitar gravações simultâneas
-    if (activeRecordings.size >= 3) {
-      console.log('❌ Servidor ocupado');
+    if (activeRecordings.size >= MAX_CONCURRENT) {
       return res.status(429).json({ 
-        error: 'Servidor ocupado. Máximo 3 gravações simultâneas.',
+        error: 'Servidor ocupado. Apenas 1 gravação simultânea permitida.',
         activeRecordings: activeRecordings.size
       });
     }
     
-    // Criar nova gravação
     const id = `rec_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     const info = {
       id,
       url,
       status: 'queued',
-      message: 'Na fila de gravação...',
+      message: 'Na fila...',
       progress: 0,
       startedAt: new Date().toISOString()
     };
     
     activeRecordings.set(id, info);
-    console.log(`🎵 Nova gravação criada: ${id}`);
+    console.log(`🎵 Nova gravação REAL: ${id}`);
     
-    // Iniciar gravação assíncrona
+    // Iniciar gravação
     setImmediate(async () => {
       try {
-        await simulateRecording(url, info);
+        await ensureDownloadsDir();
+        await realRecording(url, info);
       } catch (error) {
-        console.error(`❌ Erro na gravação ${id}:`, error);
+        console.error(`Erro fatal ${id}:`, error);
         info.status = 'error';
-        info.error = 'Erro interno durante a gravação: ' + error.message;
+        info.error = 'Erro interno: ' + error.message;
       }
     });
     
-    // Resposta imediata
-    res.json({ 
-      success: true, 
-      recordingId: id,
-      message: 'Gravação iniciada com sucesso',
-      statusUrl: `/status/${id}`
-    });
+    res.json({ success: true, recordingId: id });
     
   } catch (error) {
-    console.error('❌ Erro no endpoint /record:', error);
-    res.status(500).json({ 
-      error: 'Erro interno do servidor',
-      details: error.message
-    });
+    console.error('Erro no /record:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
-// Status da gravação
 app.get('/status/:id', (req, res) => {
-  try {
-    const id = req.params.id;
-    const info = activeRecordings.get(id);
-    
-    if (!info) {
-      return res.status(404).json({ 
-        error: 'Gravação não encontrada',
-        id: id
-      });
-    }
-    
-    console.log(`📊 Status solicitado para: ${id} - ${info.status}`);
-    res.json(info);
-    
-  } catch (error) {
-    console.error('❌ Erro no endpoint /status:', error);
-    res.status(500).json({ 
-      error: 'Erro interno do servidor',
-      details: error.message
-    });
+  const info = activeRecordings.get(req.params.id);
+  if (!info) {
+    return res.status(404).json({ error: 'Gravação não encontrada' });
   }
+  res.json(info);
 });
 
-// Download do arquivo
-app.get('/download/:id', (req, res) => {
+app.get('/download/:id', async (req, res) => {
   try {
-    const id = req.params.id;
-    const info = activeRecordings.get(id);
-    
-    console.log(`📥 Download solicitado para: ${id}`);
+    const info = activeRecordings.get(req.params.id);
     
     if (!info) {
-      return res.status(404).json({ 
-        error: 'Gravação não encontrada',
-        id: id
-      });
+      return res.status(404).json({ error: 'Gravação não encontrada' });
     }
     
     if (info.status !== 'completed') {
       return res.status(400).json({ 
-        error: 'Gravação ainda não foi concluída',
-        status: info.status,
-        progress: info.progress
+        error: 'Gravação não concluída',
+        status: info.status
       });
     }
     
     if (!info.file || !fs.existsSync(info.file)) {
-      return res.status(404).json({ 
-        error: 'Arquivo não encontrado no servidor',
-        file: info.file
-      });
+      return res.status(404).json({ error: 'Arquivo não encontrado' });
     }
     
-    const filename = `${info.videoTitle?.replace(/[^\w\s-]/g, '').trim() || 'beat'}_demo.txt`;
-    
-    console.log(`📦 Enviando arquivo: ${filename}`);
+    const filename = `${info.videoTitle?.replace(/[^\w\s-]/g, '').trim() || 'beat'}_recording.webm`;
     
     res.download(info.file, filename, (err) => {
-      if (err) {
-        console.error(`❌ Erro no download ${id}:`, err);
-      } else {
-        console.log(`✅ Download concluído: ${id}`);
-        // Limpar arquivo após download
-        try {
-          fs.unlinkSync(info.file);
-          activeRecordings.delete(id);
-        } catch (cleanupErr) {
-          console.error('Erro na limpeza:', cleanupErr);
-        }
+      if (!err) {
+        fsPromises.unlink(info.file).catch(() => {});
+        activeRecordings.delete(req.params.id);
+        console.log(`📥 Download concluído: ${req.params.id}`);
       }
     });
     
   } catch (error) {
-    console.error('❌ Erro no endpoint /download:', error);
-    res.status(500).json({ 
-      error: 'Erro interno do servidor',
-      details: error.message
-    });
+    console.error('Erro no download:', error);
+    res.status(500).json({ error: 'Erro interno' });
   }
 });
 
-// Listar gravações ativas (debug)
-app.get('/recordings', (req, res) => {
-  const recordings = Array.from(activeRecordings.entries()).map(([id, info]) => ({
-    id,
-    status: info.status,
-    progress: info.progress,
-    startedAt: info.startedAt
-  }));
-  
-  res.json({
-    activeRecordings: recordings.length,
-    recordings: recordings
-  });
-});
-
-// Limpeza periódica
-setInterval(() => {
+// Limpeza
+setInterval(async () => {
   const now = Date.now();
-  let cleaned = 0;
+  const toDelete = [];
   
   for (const [id, rec] of activeRecordings.entries()) {
     const recordingTime = parseInt(id.split('_')[1]);
     const age = now - recordingTime;
     
-    // Limpar gravações com mais de 10 minutos
-    if (age > 10 * 60 * 1000) {
-      try {
-        if (rec.file && fs.existsSync(rec.file)) {
-          fs.unlinkSync(rec.file);
-        }
-        activeRecordings.delete(id);
-        cleaned++;
-      } catch (err) {
-        console.error('Erro na limpeza:', err);
+    if (age > 10 * 60 * 1000) { // 10 minutos
+      toDelete.push(id);
+      if (rec.file && fs.existsSync(rec.file)) {
+        try {
+          await fsPromises.unlink(rec.file);
+        } catch (e) {}
       }
     }
   }
   
-  if (cleaned > 0) {
-    console.log(`🧹 Limpeza automática: ${cleaned} gravações antigas removidas`);
+  toDelete.forEach(id => activeRecordings.delete(id));
+  if (toDelete.length > 0) {
+    console.log(`🧹 Limpeza: ${toDelete.length} gravações antigas`);
   }
-}, 5 * 60 * 1000); // A cada 5 minutos
+}, 5 * 60 * 1000);
 
-// Tratamento de erros globais
-process.on('uncaughtException', (err) => {
-  console.error('❌ Exceção não capturada:', err);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Promise rejeitada:', reason);
-});
-
-// Inicialização do servidor
-function startServer() {
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Beat Recorder Server ONLINE!`);
-    console.log(`📡 Porta: ${PORT}`);
-    console.log(`📁 Downloads: ${DOWNLOADS_DIR}`);
-    console.log(`🌍 Ambiente: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`⏰ Iniciado em: ${new Date().toISOString()}`);
-    console.log(`🎵 Pronto para receber gravações!`);
-  });
-
-  // Configurar timeouts do servidor
-  server.keepAliveTimeout = 120 * 1000; // 120 segundos
-  server.headersTimeout = 125 * 1000;   // 125 segundos
-  
-  return server;
+// Inicialização
+async function startServer() {
+  try {
+    await ensureDownloadsDir();
+    
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Beat Recorder REAL na porta ${PORT}`);
+      console.log(`🎵 Gravação de áudio REAL ativada!`);
+      console.log(`📁 Downloads: ${DOWNLOADS_DIR}`);
+    });
+    
+    // Configurar timeouts
+    server.keepAliveTimeout = 120 * 1000;
+    server.headersTimeout = 125 * 1000;
+    
+  } catch (error) {
+    console.error('❌ Erro ao iniciar:', error);
+    process.exit(1);
+  }
 }
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('📴 Recebido SIGTERM, iniciando shutdown...');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('📴 Recebido SIGINT, iniciando shutdown...');
-  process.exit(0);
-});
 
 startServer();
