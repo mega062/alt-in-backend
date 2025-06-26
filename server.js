@@ -68,7 +68,7 @@ async function ensureDownloadsDir() {
 }
 
 // ======================================================
-// CORE: GRAVAÇÃO COM BROWSER + FFMPEG
+// CORE: GRAVAÇÃO COM BROWSER + FFMPEG (VERSÃO MELHORADA)
 // ======================================================
 
 async function recordBeatCompleto(youtubeUrl, recordingInfo) {
@@ -108,14 +108,18 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     await page.setViewport({ width: 1280, height: 720 });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
+    // ✅ Interceptação mais seletiva - permite scripts do YouTube
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
       const url = req.url();
       
-      if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font') {
+      // Permitir scripts do YouTube (necessários para o player)
+      if (url.includes('youtube.com') && resourceType === 'script') {
+        req.continue();
+      } else if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font') {
         req.abort();
-      } else if (url.includes('googlesyndication') || url.includes('googletagservices') || url.includes('doubleclick')) {
+      } else if (url.includes('googlesyndication') || url.includes('googletagservices')) {
         req.abort();
       } else {
         req.continue();
@@ -129,82 +133,259 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     console.log(`🎵 URL limpa: ${cleanUrl}`);
 
     await page.goto(cleanUrl, { 
-      waitUntil: 'domcontentloaded',
-      timeout: 60000 
+      waitUntil: 'networkidle2', // ✅ Aguarda mais carregamento
+      timeout: 90000 // ✅ Timeout maior
     });
 
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    // ✅ Aguardar mais tempo para página carregar
+    console.log('⏳ Aguardando página carregar completamente...');
+    await new Promise(resolve => setTimeout(resolve, 10000)); // 10s
 
+    // ✅ DEBUG: Verificar o que tem na página
+    console.log('🔍 Debugando elementos da página...');
+    const pageDebug = await page.evaluate(() => {
+      const videos = document.querySelectorAll('video');
+      const players = document.querySelectorAll('[id*="player"], [class*="player"]');
+      const containers = document.querySelectorAll('[id*="movie"], [class*="movie"]');
+      
+      return {
+        videosCount: videos.length,
+        videosInfo: Array.from(videos).map(v => ({
+          id: v.id,
+          className: v.className,
+          tagName: v.tagName,
+          src: v.src,
+          currentSrc: v.currentSrc
+        })),
+        playersCount: players.length,
+        playersInfo: Array.from(players).slice(0, 5).map(p => ({
+          id: p.id,
+          className: p.className,
+          tagName: p.tagName
+        })),
+        containersCount: containers.length,
+        containersInfo: Array.from(containers).slice(0, 5).map(c => ({
+          id: c.id,
+          className: c.className,
+          tagName: c.tagName
+        })),
+        url: window.location.href,
+        title: document.title
+      };
+    });
+    
+    console.log('📊 Debug da página:', JSON.stringify(pageDebug, null, 2));
+
+    // ✅ Lista expandida de seletores
     const videoSelectors = [
       'video',
       '#movie_player video',
       '.html5-video-player video',
       'video.video-stream',
-      '[data-layer="4"] video'
+      '[data-layer="4"] video',
+      '#player video',
+      '.ytp-html5-video',
+      'video.html5-main-video',
+      '[id*="video"] video',
+      '[class*="video"] video',
+      'ytd-player video',
+      '#ytd-player video',
+      '.ytd-player video',
+      'div[id="movie_player"] video',
+      'div[class*="player"] video'
     ];
 
     let videoElement = null;
+    let foundSelector = null;
+    
     for (const selector of videoSelectors) {
       try {
         console.log(`🔍 Tentando seletor: ${selector}`);
-        await page.waitForSelector(selector, { timeout: 10000 });
-        videoElement = selector;
-        console.log(`✅ Vídeo encontrado com: ${selector}`);
-        break;
+        await page.waitForSelector(selector, { timeout: 8000 });
+        
+        // ✅ Verificar se o elemento realmente existe e é válido
+        const isValid = await page.evaluate((sel) => {
+          const element = document.querySelector(sel);
+          return element && element.tagName === 'VIDEO';
+        }, selector);
+        
+        if (isValid) {
+          videoElement = selector;
+          foundSelector = selector;
+          console.log(`✅ Vídeo encontrado com: ${selector}`);
+          break;
+        } else {
+          console.log(`⚠️ Seletor ${selector} encontrou elemento, mas não é um vídeo válido`);
+        }
+        
       } catch (e) {
-        console.log(`❌ Seletor ${selector} falhou`);
+        console.log(`❌ Seletor ${selector} falhou: ${e.message}`);
         continue;
       }
     }
 
+    // ✅ Se não encontrou com seletores, tentar aguardar mais e forçar carregamento
     if (!videoElement) {
-      throw new Error('Player de vídeo não encontrado em nenhum seletor');
+      console.log('🔄 Nenhum seletor funcionou, tentando estratégias alternativas...');
+      
+      // Tentar clicar em botões de play ou consent
+      try {
+        const buttons = await page.evaluate(() => {
+          const playButtons = document.querySelectorAll('button[aria-label*="play"], button[title*="play"], .ytp-play-button, [role="button"]');
+          const consentButtons = document.querySelectorAll('button[aria-label*="Accept"], button[aria-label*="Aceitar"], button:contains("I agree")');
+          
+          return {
+            playButtons: playButtons.length,
+            consentButtons: consentButtons.length
+          };
+        });
+        
+        console.log(`🔍 Encontrados ${buttons.playButtons} botões de play e ${buttons.consentButtons} botões de consent`);
+        
+        // Tentar aceitar cookies/consent
+        try {
+          await page.click('button[aria-label*="Accept"], button[aria-label*="Aceitar"]', { timeout: 3000 });
+          console.log('✅ Clicou em botão de consent');
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        } catch (e) {
+          console.log('⚠️ Sem botões de consent encontrados');
+        }
+        
+        // Tentar aguardar mais um pouco
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        // Tentar os seletores novamente
+        for (const selector of videoSelectors.slice(0, 5)) { // Apenas os principais
+          try {
+            console.log(`🔄 Re-tentando seletor: ${selector}`);
+            await page.waitForSelector(selector, { timeout: 5000 });
+            videoElement = selector;
+            foundSelector = selector;
+            console.log(`✅ Vídeo encontrado na segunda tentativa com: ${selector}`);
+            break;
+          } catch (e) {
+            continue;
+          }
+        }
+        
+      } catch (error) {
+        console.log('⚠️ Erro ao tentar estratégias alternativas:', error.message);
+      }
+    }
+
+    if (!videoElement) {
+      // ✅ Salvar screenshot para debug
+      try {
+        const screenshot = await page.screenshot({ encoding: 'base64' });
+        console.log('📸 Screenshot da página salvo (primeiros 100 chars):', screenshot.substring(0, 100));
+      } catch (e) {
+        console.log('⚠️ Não foi possível capturar screenshot');
+      }
+      
+      throw new Error(`Player de vídeo não encontrado. Página carregada: ${pageDebug.title}. Vídeos encontrados: ${pageDebug.videosCount}`);
     }
 
     recordingInfo.status = 'preparing_recording';
     recordingInfo.message = 'Preparando gravação...';
 
+    // ✅ Obter informações do vídeo com fallbacks (melhorado)
     const videoInfo = await page.evaluate((videoSelector) => {
       const video = document.querySelector(videoSelector);
       
+      // Título - mais seletores
       const titleSelectors = [
         'h1.title yt-formatted-string',
         '#title h1',
         '[id="title"] h1',
         '.ytd-video-primary-info-renderer h1',
-        'h1.ytd-watch-metadata'
+        'h1.ytd-watch-metadata',
+        'h1[class*="title"]',
+        '.watch-title',
+        '#watch-headline-title',
+        'meta[property="og:title"]'
       ];
       
       let title = 'Unknown';
       for (const titleSel of titleSelectors) {
-        const titleEl = document.querySelector(titleSel);
-        if (titleEl && titleEl.innerText.trim()) {
-          title = titleEl.innerText.trim();
-          break;
+        try {
+          let titleEl;
+          if (titleSel.startsWith('meta')) {
+            titleEl = document.querySelector(titleSel);
+            if (titleEl && titleEl.content) {
+              title = titleEl.content.trim();
+              break;
+            }
+          } else {
+            titleEl = document.querySelector(titleSel);
+            if (titleEl && titleEl.innerText && titleEl.innerText.trim()) {
+              title = titleEl.innerText.trim();
+              break;
+            }
+          }
+        } catch (e) {
+          continue;
         }
       }
 
+      // Autor - mais seletores
       const authorSelectors = [
         '#channel-name a',
         '#owner-text .yt-simple-endpoint',
         '.ytd-channel-name a',
-        '#upload-info #channel-name a'
+        '#upload-info #channel-name a',
+        '[class*="channel"] a',
+        'meta[name="author"]'
       ];
       
       let author = 'Unknown';
       for (const authorSel of authorSelectors) {
-        const authorEl = document.querySelector(authorSel);
-        if (authorEl && authorEl.innerText.trim()) {
-          author = authorEl.innerText.trim();
-          break;
+        try {
+          let authorEl;
+          if (authorSel.startsWith('meta')) {
+            authorEl = document.querySelector(authorSel);
+            if (authorEl && authorEl.content) {
+              author = authorEl.content.trim();
+              break;
+            }
+          } else {
+            authorEl = document.querySelector(authorSel);
+            if (authorEl && authorEl.innerText && authorEl.innerText.trim()) {
+              author = authorEl.innerText.trim();
+              break;
+            }
+          }
+        } catch (e) {
+          continue;
+        }
+      }
+      
+      // Duração com fallbacks
+      let duration = 300; // Default
+      if (video) {
+        if (video.duration && video.duration > 0) {
+          duration = video.duration;
+        } else {
+          // Tentar obter de elementos da página
+          const durationElements = document.querySelectorAll('.ytp-time-duration, [class*="duration"], [aria-label*="duration"]');
+          for (const el of durationElements) {
+            const text = el.innerText || el.textContent || el.getAttribute('aria-label') || '';
+            const match = text.match(/(\d+):(\d+)/);
+            if (match) {
+              duration = parseInt(match[1]) * 60 + parseInt(match[2]);
+              break;
+            }
+          }
         }
       }
       
       return {
         title: title,
         author: author,
-        duration: video ? (video.duration || 300) : 300,
-        currentTime: video ? video.currentTime : 0
+        duration: duration,
+        currentTime: video ? video.currentTime : 0,
+        videoFound: !!video,
+        videoSrc: video ? video.src : 'none',
+        videoCurrentSrc: video ? video.currentSrc : 'none'
       };
     }, videoElement);
 
@@ -213,6 +394,7 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
     recordingInfo.videoDuration = videoInfo.duration;
 
     console.log(`🎵 Informações obtidas: ${videoInfo.title} por ${videoInfo.author} (${Math.round(videoInfo.duration)}s)`);
+    console.log(`🎵 Vídeo encontrado: ${videoInfo.videoFound}, Src: ${videoInfo.videoSrc}`);
 
     const recordingDuration = Math.ceil(videoInfo.duration) + 10;
     
@@ -250,19 +432,38 @@ async function recordBeatCompleto(youtubeUrl, recordingInfo) {
       throw new Error('Nenhum comando FFmpeg funcionou');
     }
 
+    // ✅ Iniciar reprodução com mais tentativas
+    console.log(`🎬 Iniciando reprodução com seletor: ${foundSelector}`);
     await page.evaluate((videoSelector) => {
       const video = document.querySelector(videoSelector);
       if (video) {
+        console.log('🎬 Configurando vídeo...');
         video.currentTime = 0;
         video.muted = false;
         video.volume = 1.0;
         
-        const playPromise = video.play();
-        if (playPromise !== undefined) {
-          playPromise.catch(error => {
-            console.log('Erro no play:', error);
-          });
-        }
+        // Múltiplas tentativas de play
+        const tryPlay = () => {
+          const playPromise = video.play();
+          if (playPromise !== undefined) {
+            playPromise
+              .then(() => console.log('✅ Play bem-sucedido'))
+              .catch(error => {
+                console.log('⚠️ Erro no play, tentando novamente:', error);
+                setTimeout(tryPlay, 1000);
+              });
+          }
+        };
+        
+        tryPlay();
+        
+        // Também tentar clicar em botões de play
+        const playButtons = document.querySelectorAll('.ytp-play-button, [aria-label*="play"], [title*="play"]');
+        playButtons.forEach(btn => {
+          try {
+            btn.click();
+          } catch (e) {}
+        });
       }
     }, videoElement);
 
@@ -741,3 +942,4 @@ async function startServer() {
 }
 
 startServer();
+    </style>
